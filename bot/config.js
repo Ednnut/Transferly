@@ -16,19 +16,17 @@ if (missing.length > 0) {
 
 const apiSecret = process.env.API_SECRET;
 const adminApiToken = apiSecret || process.env.ADMIN_API_TOKEN;
-const apiHmacSecret = apiSecret || process.env.API_HMAC_SECRET;
-if (!adminApiToken || !apiHmacSecret) {
-  console.error('❌ Bot environment is missing API credentials. Set API_SECRET (preferred) or both ADMIN_API_TOKEN + API_HMAC_SECRET.');
+const apiHmacSecret = apiSecret || process.env.API_HMAC_SECRET || '';
+if (!adminApiToken) {
+  console.error('❌ Bot environment is missing API credentials. Set API_SECRET or ADMIN_API_TOKEN.');
   process.exit(1);
 }
 
-const scriptsApiUrl = process.env.SCRIPTS_API_URL || process.env.TEMPLATES_API_URL || process.env.API_URL;
-
 try {
   // eslint-disable-next-line no-new
-  new URL(scriptsApiUrl);
+  new URL(process.env.API_URL);
 } catch (error) {
-  console.error(`❌ Invalid SCRIPTS_API_URL: ${scriptsApiUrl || 'undefined'} (${error.message})`);
+  console.error(`❌ Invalid API_URL: ${process.env.API_URL || 'undefined'} (${error.message})`);
   process.exit(1);
 }
 
@@ -37,15 +35,14 @@ try {
 module.exports = {
   admin: {
     userId: process.env.ADMIN_TELEGRAM_ID,
+    ownerId: process.env.OWNER_TELEGRAM_ID || process.env.ADMIN_TELEGRAM_ID,
+    ownerExplicit: Boolean(process.env.OWNER_TELEGRAM_ID),
     username: process.env.ADMIN_TELEGRAM_USERNAME,
     apiToken: adminApiToken
   },
   apiUrl: process.env.API_URL,
   botToken: process.env.BOT_TOKEN,
-  scriptsApiUrl,
-  defaultVoiceModel: process.env.DEFAULT_VOICE_MODEL || 'aura-asteria-en',
-  defaultBusinessId: process.env.DEFAULT_BUSINESS_ID || 'general',
-  defaultPurpose: process.env.DEFAULT_CALL_PURPOSE || 'general',
+  scriptsApiUrl: process.env.API_URL,
   apiAuth: {
     hmacSecret: apiHmacSecret,
   },

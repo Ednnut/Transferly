@@ -1,12 +1,12 @@
 const config = require('../config');
-const { paypalInvoiceService } = require('../services/paypalInvoiceService');
+const { providerInvoiceService } = require('../services/providerInvoiceService');
 const { paymentReconciliationService } = require('../services/paymentReconciliationService');
-const { paypalPayoutService } = require('../services/paypalPayoutService');
+const { payoutProcessingService } = require('../services/payoutProcessingService');
 const { webhookService } = require('../services/webhookService');
 
 async function dispatchInvoiceCreation(payload) {
   if (config.INLINE_QUEUE_MODE) {
-    return paypalInvoiceService.createAndSendInvoice(payload);
+    return providerInvoiceService.createAndSendInvoice(payload);
   }
 
   const { invoiceSendQueue, invoiceSendQueueEvents } = require('./queues');
@@ -16,7 +16,7 @@ async function dispatchInvoiceCreation(payload) {
 
 async function dispatchPayoutProcessing(payoutId, jobName, jobId) {
   if (config.INLINE_QUEUE_MODE) {
-    return paypalPayoutService.processQueuedPayout(payoutId);
+    return payoutProcessingService.processQueuedPayout(payoutId);
   }
 
   const { payoutProcessQueue, payoutProcessQueueEvents } = require('./queues');

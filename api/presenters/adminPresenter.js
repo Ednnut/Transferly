@@ -1,5 +1,21 @@
-const { presentPayout } = require('./paymentPresenter');
+const { presentInvoice, presentPayout } = require('./paymentPresenter');
 const { formatMoney } = require('../utils/money');
+
+function presentAdminInvoice(invoice) {
+  const provider = String(invoice.metadata?.provider || 'paypal').toLowerCase();
+  const providerActions = {
+    paypal: ['refresh', 'release_funds', 'open_hosted_link', 'cancel'],
+    stripe: ['refresh', 'release_funds', 'open_hosted_link', 'open_pdf', 'void'],
+    crypto: ['refresh', 'release_funds', 'open_hosted_link', 'mark_review_required']
+  };
+
+  return {
+    ...presentInvoice(invoice),
+    user_id: invoice.userId,
+    provider,
+    admin_actions: providerActions[provider] || ['refresh', 'open_hosted_link']
+  };
+}
 
 function presentAdminPayout(payout) {
   return {
@@ -158,6 +174,7 @@ function presentPaymentOpsIssue(issue) {
 }
 
 module.exports = {
+  presentAdminInvoice,
   presentAdminUser,
   presentAdminPayout,
   presentInvoiceReminderConfiguration,

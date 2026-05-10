@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'BOT',
       script: './bot.js',
-      cwd: '/home/ubuntu/voicednut/bot',
+      cwd: '/home/ubuntu/transferly/bot',
       instances: 1, // ✅ Single instance
       exec_mode: 'fork',
 
@@ -15,9 +15,9 @@ module.exports = {
       max_restarts: 5,
       min_uptime: '10s',
 
-      log_file: '/home/ubuntu/voicednut/logs/bot/combined.log',
-      out_file: '/home/ubuntu/voicednut/logs/bot/out.log',
-      error_file: '/home/ubuntu/voicednut/logs/bot/error.log',
+      log_file: '/home/ubuntu/transferly/logs/bot/combined.log',
+      out_file: '/home/ubuntu/transferly/logs/bot/out.log',
+      error_file: '/home/ubuntu/transferly/logs/bot/error.log',
       log_type: 'json',
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
 

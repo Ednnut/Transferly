@@ -1,5 +1,6 @@
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const TOKEN_STORAGE_KEY = 'transferly_api_token';
+const ADMIN_TOKEN_STORAGE_KEY = 'transferly_admin_api_token';
 const LEGACY_TOKEN_STORAGE_KEY = 'slipcraft_api_token';
 
 function buildUrl(path) {
@@ -8,6 +9,18 @@ function buildUrl(path) {
   }
 
   return `${API_BASE_URL}${path}`;
+}
+
+function buildQuery(params = {}) {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '' || value === 'ALL') {
+      return;
+    }
+    search.set(key, String(value));
+  });
+  const query = search.toString();
+  return query ? `?${query}` : '';
 }
 
 async function parseJsonSafely(response) {
@@ -39,6 +52,10 @@ export function getStoredToken() {
   return null;
 }
 
+export function getStoredAdminToken() {
+  return window.localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || null;
+}
+
 export function setStoredToken(token) {
   if (!token) {
     clearStoredToken();
@@ -48,9 +65,31 @@ export function setStoredToken(token) {
   window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
 }
 
+export function setStoredAdminToken(token) {
+  if (!token) {
+    window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    return;
+  }
+
+  window.localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token);
+}
+
 export function clearStoredToken() {
   window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
   window.localStorage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
+}
+
+function getStoredTokenForPath(path) {
+  if (path.startsWith('/api/admin')) {
+    return getStoredAdminToken() || getStoredToken();
+  }
+
+  if (path === '/api/me') {
+    return getStoredToken() || getStoredAdminToken();
+  }
+
+  return getStoredToken();
 }
 
 export async function apiRequest(path, options = {}) {
@@ -63,7 +102,7 @@ export async function apiRequest(path, options = {}) {
     body = JSON.stringify(body);
   }
 
-  const token = getStoredToken();
+  const token = getStoredTokenForPath(path);
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);
   }
@@ -206,6 +245,46 @@ export function listAdminInvoiceTemplates() {
   return apiRequest('/api/admin/invoice-templates');
 }
 
+export function listAdminInvoices(params = {}) {
+  return apiRequest(`/api/admin/invoices${buildQuery(params)}`);
+}
+
+export function listPaymentProviders() {
+  return apiRequest('/api/admin/payment-providers');
+}
+
+export function listPaymentProviderInvoiceFeatures() {
+  return apiRequest('/api/admin/payment-providers/invoice-features');
+}
+
+export function getPaymentProviderBalance(provider) {
+  return apiRequest(`/api/admin/payment-providers/${encodeURIComponent(provider)}/balance`);
+}
+
+export function listStripeConnectedAccounts(params = {}) {
+  return apiRequest(`/api/admin/payment-providers/stripe/connected-accounts${buildQuery(params)}`);
+}
+
+export function createStripeConnectedAccount(payload) {
+  return apiRequest('/api/admin/payment-providers/stripe/connected-accounts', {
+    method: 'POST',
+    body: payload
+  });
+}
+
+export function refreshStripeConnectedAccount(accountId) {
+  return apiRequest(`/api/admin/payment-providers/stripe/connected-accounts/${encodeURIComponent(accountId)}/refresh`, {
+    method: 'POST'
+  });
+}
+
+export function createStripeConnectedAccountOnboardingLink(accountId, payload = {}) {
+  return apiRequest(`/api/admin/payment-providers/stripe/connected-accounts/${encodeURIComponent(accountId)}/onboarding-link`, {
+    method: 'POST',
+    body: payload
+  });
+}
+
 export function listInvoiceReminderConfigurations(type) {
   const search = type ? `?type=${encodeURIComponent(type)}` : '';
   return apiRequest(`/api/admin/invoice-reminders${search}`);
@@ -329,12 +408,19 @@ export function deleteTestimonial(testimonialId) {
   });
 }
 
-export function listInvoices() {
-  return apiRequest('/api/invoices');
+export function listInvoices(params = {}) {
+  return apiRequest(`/api/invoices${buildQuery(params)}`);
 }
 
 export function createInvoice(payload) {
   return apiRequest('/api/invoices', {
+    method: 'POST',
+    body: payload
+  });
+}
+
+export function previewInvoice(payload) {
+  return apiRequest('/api/invoices/preview', {
     method: 'POST',
     body: payload
   });
@@ -378,8 +464,12 @@ export function getInvoiceTimeline(invoiceId, limit = 25) {
   return apiRequest(`/api/invoices/${encodeURIComponent(invoiceId)}/timeline?limit=${encodeURIComponent(limit)}`);
 }
 
-export function listPayouts() {
-  return apiRequest('/api/payouts');
+export function listPayouts(params = {}) {
+  return apiRequest(`/api/payouts${buildQuery(params)}`);
+}
+
+export function listAdminPayouts(params = {}) {
+  return apiRequest(`/api/admin/payouts${buildQuery(params)}`);
 }
 
 export function createPayout(payload) {
@@ -389,8 +479,59 @@ export function createPayout(payload) {
   });
 }
 
+export function previewPayout(payload) {
+  return apiRequest('/api/payouts/preview', {
+    method: 'POST',
+    body: payload
+  });
+}
+
 export function getPayout(payoutId) {
   return apiRequest(`/api/payouts/${encodeURIComponent(payoutId)}`);
+}
+
+export function approveAdminPayout(payoutId) {
+  return apiRequest(`/api/admin/payouts/${encodeURIComponent(payoutId)}/approve`, {
+    method: 'POST'
+  });
+}
+
+export function rejectAdminPayout(payoutId, reason) {
+  return apiRequest(`/api/admin/payouts/${encodeURIComponent(payoutId)}/reject`, {
+    method: 'POST',
+    body: reason ? { reason } : {}
+  });
+}
+
+export function releaseAdminInvoiceFunds(invoiceId, payload = {}) {
+  return apiRequest(`/api/admin/invoices/${encodeURIComponent(invoiceId)}/release`, {
+    method: 'POST',
+    headers: {
+      'Idempotency-Key': `invoice-release:${invoiceId}:${Date.now()}`
+    },
+    body: payload
+  });
+}
+
+export function markAdminInvoiceReviewRequired(invoiceId, payload = {}) {
+  return apiRequest(`/api/admin/invoices/${encodeURIComponent(invoiceId)}/review-required`, {
+    method: 'POST',
+    body: payload
+  });
+}
+
+export function addAdminInvoiceNote(invoiceId, note) {
+  return apiRequest(`/api/admin/invoices/${encodeURIComponent(invoiceId)}/notes`, {
+    method: 'POST',
+    body: { note }
+  });
+}
+
+export function addAdminPayoutNote(payoutId, note) {
+  return apiRequest(`/api/admin/payouts/${encodeURIComponent(payoutId)}/notes`, {
+    method: 'POST',
+    body: { note }
+  });
 }
 
 export function refreshPayout(payoutId) {

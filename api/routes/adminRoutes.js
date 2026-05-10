@@ -2,6 +2,8 @@ const express = require('express');
 
 const {
   adjustAdminUserPointsController,
+  addInvoiceNoteController,
+  addPayoutNoteController,
   acknowledgePaymentOpsIssueController,
   approvePayoutController,
   cancelUnclaimedPayoutController,
@@ -13,28 +15,41 @@ const {
   suspendInvoiceReminderConfigurationController,
   resumeInvoiceReminderConfigurationController,
   createAdminInvoiceTemplateController,
+  createStripeConnectedAccountController,
+  createStripeConnectedAccountOnboardingLinkController,
   createAdminTestimonialController,
   deleteAdminFaqController,
   deleteAdminInvoiceTemplateController,
   deleteAdminTestimonialController,
+  getPaymentProviderBalanceController,
+  getPaymentProviderInvoiceFeaturesController,
+  getPaymentProviderController,
   getQueueOverviewController,
   listAdminInvoiceTemplatesController,
+  listAdminInvoicesController,
   listAdminUsersController,
   listTopUpOrdersController,
   listDeadLetterJobsController,
   listPaymentOpsIssuesController,
+  listPaymentProviderInvoiceFeaturesController,
+  listPaymentProvidersController,
+  listStripeConnectedAccountsController,
   reopenPaymentOpsIssueController,
   runPaymentReconciliationController,
   rejectPayoutController,
+  refreshAdminInvoiceController,
+  refreshStripeConnectedAccountController,
   resolvePaymentOpsIssueController,
   releaseInvoiceFundsController,
+  markInvoiceReviewRequiredController,
   listAdminPayoutsController,
   listRiskFlagsController,
   listWebhookEventsController,
   updateAdminConfigController,
   updateAdminFaqController,
   updateAdminInvoiceTemplateController,
-  updateAdminTestimonialController
+  updateAdminTestimonialController,
+  voidAdminInvoiceController
 } = require('../controllers/adminController');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { requireAdminActor } = require('../middleware/requireAdminActor');
@@ -55,7 +70,45 @@ router.get('/invoice-templates', requireAdminActor, asyncHandler(listAdminInvoic
 router.post('/invoice-templates', requireAdminActor, asyncHandler(createAdminInvoiceTemplateController));
 router.patch('/invoice-templates/:id', requireAdminActor, asyncHandler(updateAdminInvoiceTemplateController));
 router.delete('/invoice-templates/:id', requireAdminActor, asyncHandler(deleteAdminInvoiceTemplateController));
+router.get('/invoices', requireAdminActor, asyncHandler(listAdminInvoicesController));
 router.get('/payouts', requireAdminActor, asyncHandler(listAdminPayoutsController));
+router.get('/payment-providers', requireAdminActor, asyncHandler(listPaymentProvidersController));
+router.get(
+  '/payment-providers/stripe/connected-accounts',
+  requireAdminActor,
+  asyncHandler(listStripeConnectedAccountsController)
+);
+router.post(
+  '/payment-providers/stripe/connected-accounts',
+  requireAdminActor,
+  asyncHandler(createStripeConnectedAccountController)
+);
+router.post(
+  '/payment-providers/stripe/connected-accounts/:id/refresh',
+  requireAdminActor,
+  asyncHandler(refreshStripeConnectedAccountController)
+);
+router.post(
+  '/payment-providers/stripe/connected-accounts/:id/onboarding-link',
+  requireAdminActor,
+  asyncHandler(createStripeConnectedAccountOnboardingLinkController)
+);
+router.get(
+  '/payment-providers/invoice-features',
+  requireAdminActor,
+  asyncHandler(listPaymentProviderInvoiceFeaturesController)
+);
+router.get(
+  '/payment-providers/:provider/invoice-features',
+  requireAdminActor,
+  asyncHandler(getPaymentProviderInvoiceFeaturesController)
+);
+router.get(
+  '/payment-providers/:provider/balance',
+  requireAdminActor,
+  asyncHandler(getPaymentProviderBalanceController)
+);
+router.get('/payment-providers/:provider', requireAdminActor, asyncHandler(getPaymentProviderController));
 router.get('/payment-issues', requireAdminActor, asyncHandler(listPaymentOpsIssuesController));
 router.post('/payment-issues/:id/acknowledge', requireAdminActor, asyncHandler(acknowledgePaymentOpsIssueController));
 router.post('/payment-issues/:id/resolve', requireAdminActor, asyncHandler(resolvePaymentOpsIssueController));
@@ -63,6 +116,7 @@ router.post('/payment-issues/:id/reopen', requireAdminActor, asyncHandler(reopen
 router.post('/payouts/:id/approve', requireAdminActor, asyncHandler(approvePayoutController));
 router.post('/payouts/:id/cancel-unclaimed', requireAdminActor, asyncHandler(cancelUnclaimedPayoutController));
 router.post('/payouts/:id/reject', requireAdminActor, asyncHandler(rejectPayoutController));
+router.post('/payouts/:id/notes', requireAdminActor, asyncHandler(addPayoutNoteController));
 router.get('/risk-flags', requireAdminActor, asyncHandler(listRiskFlagsController));
 router.get('/webhooks', requireAdminActor, asyncHandler(listWebhookEventsController));
 router.get('/queues', requireAdminActor, asyncHandler(getQueueOverviewController));
@@ -76,6 +130,10 @@ router.post('/testimonials', requireAdminActor, asyncHandler(createAdminTestimon
 router.patch('/testimonials/:id', requireAdminActor, asyncHandler(updateAdminTestimonialController));
 router.delete('/testimonials/:id', requireAdminActor, asyncHandler(deleteAdminTestimonialController));
 router.post('/invoices/:id/release', requireAdminActor, requireIdempotencyKey, asyncHandler(releaseInvoiceFundsController));
+router.post('/invoices/:id/refresh', requireAdminActor, asyncHandler(refreshAdminInvoiceController));
+router.post('/invoices/:id/void', requireAdminActor, asyncHandler(voidAdminInvoiceController));
+router.post('/invoices/:id/review-required', requireAdminActor, asyncHandler(markInvoiceReviewRequiredController));
+router.post('/invoices/:id/notes', requireAdminActor, asyncHandler(addInvoiceNoteController));
 
 module.exports = {
   adminRoutes: router

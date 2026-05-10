@@ -3,7 +3,12 @@ const { PayPalClient } = require('../adapters/paypalClient');
 const { webhookEventRepository } = require('../repositories/webhookEventRepository');
 const { auditLogService } = require('./auditLogService');
 const { paypalWebhookHandlers } = require('../webhooks/paypalWebhookHandlers');
+const { providerInvoiceWebhookHandlers } = require('../webhooks/providerInvoiceWebhookHandlers');
 const { AppError } = require('../utils/errors');
+const {
+  verifyCoinbaseWebhookSignature,
+  verifyStripeSignature
+} = require('../utils/providerWebhookSignatures');
 const { AUDIT_ACTOR_TYPE, WEBHOOK_PROCESSING_STATUS } = require('../utils/constants');
 
 const paypalClient = new PayPalClient(
@@ -90,6 +95,85 @@ async function ingestPayPalEvent(headers, event) {
   };
 }
 
+async function ingestVerifiedProviderEvent(input) {
+  const eventId = `${input.provider}:${String(input.eventId || '')}`;
+  if (!input.eventId) {
+    throw new AppError(400, 'INVALID_WEBHOOK_EVENT', 'Webhook event id is required.');
+  }
+
+  const existing = await webhookEventRepository.findByEventId(eventId);
+  if (existing) {
+    return {
+      duplicate: true,
+      webhookEvent: existing
+    };
+  }
+
+  const webhookEvent = await webhookEventRepository.create({
+    eventId,
+    eventType: input.eventType || 'unknown',
+    resourceType: input.resourceType || null,
+    transmissionId: input.transmissionId || null,
+    status: WEBHOOK_PROCESSING_STATUS.VERIFIED,
+    payload: input.payload,
+    verificationPayload: input.verificationPayload || null
+  });
+
+  await auditLogService.log({
+    actorType: AUDIT_ACTOR_TYPE.WEBHOOK,
+    action: 'webhook.received',
+    entityType: 'webhook_event',
+    entityId: webhookEvent.id,
+    metadata: {
+      provider: input.provider,
+      eventId
+    }
+  });
+
+  return {
+    duplicate: false,
+    webhookEvent
+  };
+}
+
+async function ingestStripeEvent(headers, event, rawBody) {
+  verifyStripeSignature(rawBody, headers.signature, config.STRIPE_WEBHOOK_SECRET);
+
+  return ingestVerifiedProviderEvent({
+    provider: 'stripe',
+    eventId: event.id,
+    eventType: String(event.type || 'unknown'),
+    resourceType: event.data?.object?.object || null,
+    transmissionId: headers.signature || null,
+    payload: event,
+    verificationPayload: {
+      signature_header_present: Boolean(headers.signature)
+    }
+  });
+}
+
+async function ingestCryptoEvent(headers, event, rawBody, requestHeaders = {}) {
+  verifyCoinbaseWebhookSignature(
+    rawBody,
+    headers.signature,
+    config.CRYPTO_COMMERCE_WEBHOOK_SECRET,
+    requestHeaders
+  );
+
+  return ingestVerifiedProviderEvent({
+    provider: 'crypto',
+    eventId: event.id || headers.hookId,
+    eventType: String(event.type || event.event_type || 'unknown'),
+    resourceType: event.data?.resource || event.resource || 'crypto_charge',
+    transmissionId: headers.hookId || null,
+    payload: event,
+    verificationPayload: {
+      signature_header_present: Boolean(headers.signature),
+      hook_id: headers.hookId || null
+    }
+  });
+}
+
 async function processWebhookEvent(webhookEventId) {
   const webhookEvent = await webhookEventRepository.findById(webhookEventId);
   if (!webhookEvent) {
@@ -105,6 +189,29 @@ async function processWebhookEvent(webhookEventId) {
 
   try {
     switch (webhookEvent.eventType) {
+      case 'invoice.finalized':
+      case 'invoice.sent':
+      case 'invoice.paid':
+      case 'invoice.payment_succeeded':
+      case 'invoice.payment_failed':
+      case 'invoice.updated':
+      case 'invoice.voided':
+        await providerInvoiceWebhookHandlers.handleStripeInvoiceEvent(event);
+        break;
+      case 'account.updated':
+        await providerInvoiceWebhookHandlers.handleStripeAccountEvent(event);
+        break;
+      case 'charge:created':
+      case 'charge:pending':
+      case 'charge:confirmed':
+      case 'charge:failed':
+      case 'charge:delayed':
+      case 'charge:resolved':
+      case 'checkout.payment.success':
+      case 'checkout.payment.failed':
+      case 'checkout.payment.expired':
+        await providerInvoiceWebhookHandlers.handleCryptoChargeEvent(event);
+        break;
       case 'INVOICING.INVOICE.CREATED':
         await paypalWebhookHandlers.handleInvoiceCreated(event);
         break;
@@ -170,6 +277,8 @@ async function processWebhookEvent(webhookEventId) {
 module.exports = {
   webhookService: {
     ingestPayPalEvent,
+    ingestStripeEvent,
+    ingestCryptoEvent,
     processWebhookEvent
   }
 };

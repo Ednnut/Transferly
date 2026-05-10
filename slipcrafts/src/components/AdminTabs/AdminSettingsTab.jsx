@@ -1,17 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import { Save } from 'lucide-react';
+import { Save, ShieldCheck, Trash2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useAppContext } from '../../context/AppContext';
+import { getStoredAdminToken, setStoredAdminToken } from '../../lib/api';
 
 export default function AdminSettingsTab() {
   const { config, updateConfig } = useAppContext();
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
+  const [adminTokenDraft, setAdminTokenDraft] = useState('');
+  const [hasAdminToken, setHasAdminToken] = useState(false);
   const brand = config?.brand_color || '#f8812d';
 
   useEffect(() => {
     if (config) setForm({ ...config });
   }, [config]);
+
+  useEffect(() => {
+    setHasAdminToken(Boolean(getStoredAdminToken()));
+  }, []);
 
   const set = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
 
@@ -22,6 +29,26 @@ export default function AdminSettingsTab() {
     setSaving(false);
     if (result.success) toast.success('Settings saved!');
     else toast.error(result.message || 'Failed to save settings');
+  };
+
+  const handleSaveAdminToken = () => {
+    const token = adminTokenDraft.trim();
+    if (!token) {
+      toast.error('Enter an admin token first');
+      return;
+    }
+
+    setStoredAdminToken(token);
+    setAdminTokenDraft('');
+    setHasAdminToken(true);
+    toast.success('Admin token saved');
+  };
+
+  const handleClearAdminToken = () => {
+    setStoredAdminToken('');
+    setAdminTokenDraft('');
+    setHasAdminToken(false);
+    toast.success('Admin token cleared');
   };
 
   const Field = ({ label, field, type = 'text', note }) => (
@@ -51,6 +78,41 @@ export default function AdminSettingsTab() {
         <Field label="Tagline" field="tagline" />
         <Field label="Support Email" field="support_email" type="email" />
         <Field label="Admin Email" field="admin_email" type="email" />
+      </Section>
+
+      <Section title="Admin Session">
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">Static Admin API Token</label>
+          <input
+            type="password"
+            value={adminTokenDraft}
+            onChange={e => setAdminTokenDraft(e.target.value)}
+            className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 transition"
+            placeholder={hasAdminToken ? 'Admin token saved' : 'Paste admin token'}
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Status: {hasAdminToken ? 'admin token stored in this browser' : 'no static admin token stored'}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={handleSaveAdminToken}
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+          >
+            <ShieldCheck size={16} />
+            Save Token
+          </button>
+          <button
+            type="button"
+            onClick={handleClearAdminToken}
+            disabled={!hasAdminToken && !adminTokenDraft}
+            className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+          >
+            <Trash2 size={16} />
+            Clear Token
+          </button>
+        </div>
       </Section>
 
       <Section title="Branding">

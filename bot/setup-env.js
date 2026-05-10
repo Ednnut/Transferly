@@ -14,16 +14,16 @@ const SECTIONS = [
     ],
   },
   {
-    comments: ['# API the bot should call (point to /api server)'],
+    comments: ['# Transferly API the bot should call'],
     fields: [
       { key: 'API_URL', prompt: 'API URL', defaultValue: 'http://localhost:3000' },
-      { key: 'TEMPLATES_API_URL', prompt: 'Templates API URL', defaultValue: 'http://localhost:3000' },
     ],
   },
   {
-    comments: ['# API secret (must match API_SECRET on server)'],
+    comments: ['# API credentials'],
     fields: [
-      { key: 'API_SECRET', prompt: 'API Secret', defaultValue: 'change-me' },
+      { key: 'ADMIN_API_TOKEN', prompt: 'Admin API token', defaultValue: 'change-me' },
+      { key: 'API_HMAC_SECRET', prompt: 'API HMAC secret (optional)' },
     ],
   },
 ];

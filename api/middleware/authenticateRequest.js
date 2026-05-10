@@ -39,9 +39,11 @@ function authenticateRequest(request, _response, next) {
   }
 
   if (config.ADMIN_AUTH_ENABLED && token === config.ADMIN_API_TOKEN) {
+    const userId = config.USER_API_TOKEN_MAP[token] || null;
     request.auth = {
       role: 'ADMIN',
-      actorId: config.DEFAULT_ADMIN_ACTOR_ID
+      actorId: config.DEFAULT_ADMIN_ACTOR_ID,
+      userId
     };
     next();
     return;
@@ -85,7 +87,7 @@ function requireUserAuthIfConfigured(request, _response, next) {
     return;
   }
 
-  if (!request.auth || request.auth.role !== 'USER') {
+  if (!request.auth || (request.auth.role !== 'USER' && !(request.auth.role === 'ADMIN' && request.auth.userId))) {
     next(new AppError(401, 'USER_AUTH_REQUIRED', 'A valid user bearer token is required.'));
     return;
   }
@@ -94,7 +96,7 @@ function requireUserAuthIfConfigured(request, _response, next) {
 }
 
 function requireAuthenticatedUser(request, _response, next) {
-  if (!request.auth || request.auth.role !== 'USER') {
+  if (!request.auth || (request.auth.role !== 'USER' && !(request.auth.role === 'ADMIN' && request.auth.userId))) {
     next(new AppError(401, 'USER_AUTH_REQUIRED', 'A valid user bearer token is required.'));
     return;
   }

@@ -1,5 +1,5 @@
 const { z } = require('zod');
-const { invoiceLineItemSchema } = require('./invoiceSchemas');
+const { invoiceLineItemSchema, listInvoicesQuerySchema } = require('./invoiceSchemas');
 
 const reminderTypeSchema = z.enum(['BEFORE_DUE', 'AFTER_DUE']);
 const reminderIntervalUnitSchema = z.enum(['DAY', 'WEEK']);
@@ -26,10 +26,54 @@ const adminAdjustUserPointsSchema = z.object({
 });
 
 const listAdminPayoutsQuerySchema = z.object({
-  status: z.string().min(1).optional(),
-  riskDecision: z.string().min(1).optional(),
-  userId: z.string().min(1).optional(),
-  limit: z.coerce.number().int().positive().max(100).default(50)
+  status: z.string().trim().min(1).optional(),
+  riskDecision: z.string().trim().min(1).optional(),
+  providerState: z.string().trim().min(1).optional(),
+  recipient: z.string().trim().min(1).optional(),
+  dateFrom: z.string().trim().min(1).optional(),
+  dateTo: z.string().trim().min(1).optional(),
+  sortBy: z.enum(['createdAt', 'updatedAt', 'amount', 'receiver', 'status']).default('createdAt'),
+  sortDirection: z.enum(['asc', 'desc']).default('desc'),
+  userId: z.string().trim().min(1).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().positive().max(250).optional(),
+  limit: z.coerce.number().int().positive().max(250).default(50)
+});
+
+const listAdminInvoicesQuerySchema = listInvoicesQuerySchema.extend({
+  userId: z.string().trim().min(1).optional()
+});
+
+const adminRecordNoteSchema = z.object({
+  note: z.string().trim().min(1).max(2000)
+});
+
+const stripeConnectedAccountCreateSchema = z.object({
+  userId: z.string().trim().min(1).optional(),
+  stripeAccountId: z.string().trim().regex(/^acct_[A-Za-z0-9]+$/).optional(),
+  email: z.string().trim().email().optional(),
+  country: z.string().trim().length(2).default('US'),
+  businessType: z.enum(['individual', 'company', 'non_profit', 'government_entity']).optional(),
+  metadata: z.record(z.unknown()).optional()
+});
+
+const stripeConnectedAccountParamsSchema = z.object({
+  id: z.string().trim().min(1)
+});
+
+const stripeConnectedAccountListQuerySchema = z.object({
+  userId: z.string().trim().min(1).optional(),
+  status: z.string().trim().min(1).optional()
+});
+
+const stripeAccountLinkCreateSchema = z.object({
+  returnUrl: z.string().trim().url().optional(),
+  refreshUrl: z.string().trim().url().optional(),
+  collect: z.enum(['currently_due', 'eventually_due']).optional()
+});
+
+const markInvoiceReviewRequiredSchema = z.object({
+  reason: z.string().trim().min(1).max(1000).optional()
 });
 
 const listRiskFlagsQuerySchema = z.object({
@@ -229,6 +273,7 @@ module.exports = {
   adminFaqParamsSchema,
   adminFaqUpdateSchema,
   adminInvoiceTemplateCreateSchema,
+  adminRecordNoteSchema,
   adminInvoiceReminderParamsSchema,
   adminInvoiceReminderUpdateSchema,
   adminInvoiceTemplateParamsSchema,
@@ -244,10 +289,16 @@ module.exports = {
   paymentOpsIssueActionSchema,
   paymentOpsIssueParamsSchema,
   releaseInvoiceFundsSchema,
+  markInvoiceReviewRequiredSchema,
+  stripeAccountLinkCreateSchema,
+  stripeConnectedAccountCreateSchema,
+  stripeConnectedAccountListQuerySchema,
+  stripeConnectedAccountParamsSchema,
   runPaymentReconciliationSchema,
   topUpOrderAdminActionSchema,
   topUpOrderParamsSchema,
   listAdminPayoutsQuerySchema,
+  listAdminInvoicesQuerySchema,
   listRiskFlagsQuerySchema,
   listWebhookEventsQuerySchema,
   listDeadLetterJobsQuerySchema

@@ -11,9 +11,10 @@ const { userRepository } = require('../repositories/userRepository');
 const { auditLogService } = require('./auditLogService');
 const { ledgerService } = require('./ledgerService');
 const { paymentOpsIssueService } = require('./paymentOpsIssueService');
+const { buildPayoutPricing } = require('./payoutPricingService');
 const { riskService } = require('./riskService');
 const { AppError } = require('../utils/errors');
-const { ensurePositiveMoney, parseAmount } = require('../utils/money');
+const { ensurePositiveMoney, formatMoney, parseAmount } = require('../utils/money');
 const { PAYOUT_STATUS, RISK_DECISION, AUDIT_ACTOR_TYPE } = require('../utils/constants');
 
 const paypalClient = new PayPalClient(
@@ -72,21 +73,6 @@ function mergePayoutMetadata(payout, updates) {
 
 function providerItemStatusForPayout(payout) {
   return String(payout.metadata?.provider_item_status || '').toUpperCase();
-}
-
-function buildPayoutPricing(amountCents, platformConfig) {
-  const feeFixedCents = Number(platformConfig.payout_fee_fixed_cents || 0);
-  const feePercentageBps = Number(platformConfig.payout_fee_percentage_bps || 0);
-  const percentageFeeCents = Math.round(amountCents * (feePercentageBps / 10000));
-  const feeCents = feeFixedCents + percentageFeeCents;
-
-  return {
-    requestedAmountCents: amountCents,
-    feeCents,
-    totalDebitCents: amountCents + feeCents,
-    feeFixedCents,
-    feePercentageBps
-  };
 }
 
 function reservedAmountCentsForPayout(payout) {
@@ -374,6 +360,55 @@ async function requestPayout(input) {
   };
 }
 
+async function previewPayout(input) {
+  const user = await userRepository.findById(input.userId);
+  if (!user || !user.wallet) {
+    throw new AppError(404, 'USER_OR_WALLET_NOT_FOUND', 'User or wallet not found.');
+  }
+
+  const currency = input.currency.toUpperCase();
+  const amountCents = ensurePositiveMoney(parseAmount(input.amount));
+  const platformConfig = await platformConfigRepository.get();
+  const pricing = buildPayoutPricing(amountCents, platformConfig);
+  const payoutMinimumCents = Number(platformConfig.payout_minimum_cents || 0);
+  const riskResult = await riskService.evaluatePayout({
+    userId: input.userId,
+    receiver: input.receiver,
+    receiverCountryCode: input.receiverCountryCode,
+    amountCents,
+    currencyCode: currency
+  });
+  const availableBalanceCents = Number(user.wallet.availableBalanceCents || 0);
+
+  return {
+    requested_amount: formatMoney(pricing.requestedAmountCents),
+    fee_amount: formatMoney(pricing.feeCents),
+    total_debit: formatMoney(pricing.totalDebitCents),
+    currency,
+    requested_amount_cents: pricing.requestedAmountCents,
+    fee_cents: pricing.feeCents,
+    total_debit_cents: pricing.totalDebitCents,
+    fee_fixed_cents: pricing.feeFixedCents,
+    fee_percentage_bps: pricing.feePercentageBps,
+    minimum_amount_cents: payoutMinimumCents,
+    balance: {
+      available_cents: availableBalanceCents,
+      available: formatMoney(availableBalanceCents),
+      remaining_available_cents: availableBalanceCents - pricing.totalDebitCents,
+      remaining_available: formatMoney(availableBalanceCents - pricing.totalDebitCents),
+      sufficient: availableBalanceCents >= pricing.totalDebitCents
+    },
+    risk_decision: riskResult.decision,
+    risk_flags: riskResult.flags,
+    next_action:
+      riskResult.decision === RISK_DECISION.APPROVED
+        ? 'PROCESS'
+        : riskResult.decision === RISK_DECISION.REVIEW
+          ? 'MANUAL_REVIEW'
+          : 'BLOCK'
+  };
+}
+
 async function approvePayout(payoutId, adminActorId) {
   const payout = await payoutRepository.findById(payoutId);
   if (!payout) {
@@ -528,6 +563,7 @@ async function refreshPayout(input) {
 module.exports = {
   paypalPayoutService: {
     requestPayout,
+    previewPayout,
     approvePayout,
     rejectPayout,
     processQueuedPayout,

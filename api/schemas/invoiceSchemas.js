@@ -15,6 +15,7 @@ const invoiceLineItemSchema = z.object({
 const createInvoiceSchema = z
   .object({
     userId: z.string().min(1),
+    provider: z.enum(['paypal', 'stripe', 'crypto', 'paystack', 'flutterwave', 'wise']).default('paypal'),
     recipientEmail: z.string().email(),
     templateId: z.string().min(1).optional(),
     currency: z.string().length(3).optional(),
@@ -54,7 +55,23 @@ const createInvoiceSchema = z
     }
   });
 
+const listInvoicesQuerySchema = z.object({
+  status: z.string().trim().min(1).optional(),
+  recipient: z.string().trim().min(1).optional(),
+  provider: z.enum(['paypal', 'stripe', 'crypto', 'paystack', 'flutterwave', 'wise']).optional(),
+  providerInvoiceId: z.string().trim().min(1).optional(),
+  templateId: z.string().trim().min(1).optional(),
+  dateFrom: z.string().trim().min(1).optional(),
+  dateTo: z.string().trim().min(1).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().positive().max(250).optional(),
+  limit: z.coerce.number().int().positive().max(250).optional(),
+  sortBy: z.enum(['createdAt', 'updatedAt', 'amount', 'recipient', 'status', 'dueDate']).default('createdAt'),
+  sortDirection: z.enum(['asc', 'desc']).default('desc')
+});
+
 module.exports = {
   createInvoiceSchema,
+  listInvoicesQuerySchema,
   invoiceLineItemSchema
 };

@@ -1,7 +1,23 @@
 import React from 'react';
 
 const defaultProviders = ['Gmail', 'Yahoo', 'Outlook', 'iCloud'];
-const brandedProviders = ['PayPal', 'Binance', 'Coinbase', 'Bybit', 'Crypto.com', 'Wise', 'Cash App', 'Zelle', 'Venmo', 'Trust Wallet', 'GCash'];
+const brandedProviders = [
+  'PayPal',
+  'Stripe',
+  'Paystack',
+  'Flutterwave',
+  'Crypto Commerce',
+  'Binance',
+  'Coinbase',
+  'Bybit',
+  'Crypto.com',
+  'Wise',
+  'Cash App',
+  'Zelle',
+  'Venmo',
+  'Trust Wallet',
+  'GCash'
+];
 
 export default function EmailReceiptForm({ data, onChange }) {
   const providerOptions = [...new Set([...defaultProviders, ...brandedProviders, data.provider].filter(Boolean))];

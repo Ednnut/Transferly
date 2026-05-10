@@ -116,8 +116,21 @@ function resolveFindManyArgs(filtersOrClient, maybeClient) {
   };
 }
 
-async function findMany(filtersOrClient, maybeClient) {
-  const { filters, client } = resolveFindManyArgs(filtersOrClient, maybeClient);
+function resolveInvoiceSort(filters) {
+  const sortColumns = {
+    createdAt: 'created_at',
+    updatedAt: 'updated_at',
+    amount: 'amount_cents',
+    recipient: 'recipient_email',
+    status: 'status',
+    dueDate: 'due_date'
+  };
+  const sortBy = sortColumns[filters.sortBy] || sortColumns.createdAt;
+  const sortDirection = String(filters.sortDirection || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  return `${sortBy} ${sortDirection}`;
+}
+
+function buildFindManyWhere(filters) {
   const clauses = [];
   const params = [];
 
@@ -131,14 +144,72 @@ async function findMany(filtersOrClient, maybeClient) {
     params.push(filters.status);
   }
 
-  let sql = `SELECT * FROM invoices ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY created_at DESC`;
-  if (filters.limit) {
+  if (filters.recipient) {
+    clauses.push('(lower(recipient_email) LIKE ? OR lower(invoice_number) LIKE ? OR lower(paypal_invoice_id) LIKE ?)');
+    const search = `%${String(filters.recipient).toLowerCase()}%`;
+    params.push(search, search, search);
+  }
+
+  if (filters.provider) {
+    const provider = String(filters.provider).toLowerCase();
+    if (provider === 'paypal') {
+      clauses.push("(metadata_json IS NULL OR metadata_json = '{}' OR lower(metadata_json) LIKE ?)");
+      params.push('%"provider":"paypal"%');
+    } else {
+      clauses.push('lower(metadata_json) LIKE ?');
+      params.push(`%"provider":"${provider}"%`);
+    }
+  }
+
+  if (filters.providerInvoiceId) {
+    clauses.push('lower(paypal_invoice_id) LIKE ?');
+    params.push(`%${String(filters.providerInvoiceId).toLowerCase()}%`);
+  }
+
+  if (filters.templateId) {
+    clauses.push('template_id = ?');
+    params.push(filters.templateId);
+  }
+
+  if (filters.dateFrom) {
+    clauses.push('created_at >= ?');
+    params.push(filters.dateFrom);
+  }
+
+  if (filters.dateTo) {
+    clauses.push('created_at <= ?');
+    params.push(filters.dateTo);
+  }
+
+  return {
+    whereClause: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
+    params
+  };
+}
+
+async function findMany(filtersOrClient, maybeClient) {
+  const { filters, client } = resolveFindManyArgs(filtersOrClient, maybeClient);
+  const { whereClause, params } = buildFindManyWhere(filters);
+  let sql = `SELECT * FROM invoices ${whereClause} ORDER BY ${resolveInvoiceSort(filters)}`;
+  const limit = filters.pageSize || filters.limit;
+  if (limit) {
     sql += ' LIMIT ?';
-    params.push(filters.limit);
+    params.push(limit);
+  }
+  if (filters.offset) {
+    sql += ' OFFSET ?';
+    params.push(filters.offset);
   }
 
   const rows = await client.all(sql, params);
   return rows.map(mapInvoice);
+}
+
+async function countMany(filtersOrClient, maybeClient) {
+  const { filters, client } = resolveFindManyArgs(filtersOrClient, maybeClient);
+  const { whereClause, params } = buildFindManyWhere(filters);
+  const row = await client.get(`SELECT COUNT(*) AS count FROM invoices ${whereClause}`, params);
+  return row ? Number(row.count || 0) : 0;
 }
 
 async function update(id, updates, client = db) {
@@ -212,6 +283,7 @@ module.exports = {
     findByPaypalInvoiceId,
     findByIdentifier,
     findMany,
+    countMany,
     update
   }
 };

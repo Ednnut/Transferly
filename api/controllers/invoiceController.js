@@ -5,8 +5,9 @@ const {
 } = require('../middleware/authenticateRequest');
 const { presentInvoice, presentPaymentTimelineEntry } = require('../presenters/paymentPresenter');
 const { invoiceRepository } = require('../repositories/invoiceRepository');
-const { createInvoiceSchema } = require('../schemas/invoiceSchemas');
+const { createInvoiceSchema, listInvoicesQuerySchema } = require('../schemas/invoiceSchemas');
 const { paypalInvoiceService } = require('../services/paypalInvoiceService');
+const { providerInvoiceService } = require('../services/providerInvoiceService');
 const { paymentTimelineService } = require('../services/paymentTimelineService');
 const { paymentTimelineQuerySchema } = require('../schemas/payoutSchemas');
 const { AUDIT_ACTOR_TYPE } = require('../utils/constants');
@@ -43,6 +44,15 @@ async function createInvoiceController(request, response) {
   response.status(201).json(result);
 }
 
+async function previewInvoiceController(request, response) {
+  const body = createInvoiceSchema.parse(request.body);
+  const preview = await providerInvoiceService.previewInvoice({
+    ...body,
+    userId: resolveUserIdForRequest(request, body.userId)
+  });
+  response.json(preview);
+}
+
 async function getInvoiceController(request, response) {
   const invoice = await loadAccessibleInvoice(request, response, request.params.id);
   if (!invoice) {
@@ -53,10 +63,27 @@ async function getInvoiceController(request, response) {
 }
 
 async function listInvoicesController(request, response) {
+  const query = listInvoicesQuerySchema.parse(request.query || {});
   const userId = request.auth && request.auth.role === 'USER' ? request.auth.userId : undefined;
-  const invoices = await invoiceRepository.findMany(userId ? { userId } : {});
+  const pageSize = query.pageSize || query.limit || 50;
+  const filters = {
+    ...query,
+    pageSize,
+    offset: (query.page - 1) * pageSize
+  };
+  const scopedFilters = userId ? { ...filters, userId } : filters;
+  const [invoices, total] = await Promise.all([
+    invoiceRepository.findMany(scopedFilters),
+    invoiceRepository.countMany(scopedFilters)
+  ]);
   response.json({
-    data: invoices.map(presentInvoice)
+    data: invoices.map(presentInvoice),
+    pagination: {
+      page: query.page,
+      page_size: pageSize,
+      total,
+      has_next_page: query.page * pageSize < total
+    }
   });
 }
 
@@ -66,7 +93,7 @@ async function refreshInvoiceController(request, response) {
     return;
   }
 
-  const result = await paypalInvoiceService.refreshInvoice({
+  const result = await providerInvoiceService.refreshInvoice({
     invoiceId: invoice.id,
     actorType: resolveAuditActorType(request),
     actorId: resolveAuditActorId(request)
@@ -122,10 +149,11 @@ async function cancelInvoiceController(request, response) {
     return;
   }
 
-  const result = await paypalInvoiceService.cancelInvoice({
+  const result = await providerInvoiceService.cancelInvoice({
     invoiceId: invoice.id,
     actorType: resolveAuditActorType(request),
-    actorId: resolveAuditActorId(request)
+    actorId: resolveAuditActorId(request),
+    requestId: request.id
   });
   response.json(result);
 }
@@ -145,6 +173,7 @@ async function getInvoiceTimelineController(request, response) {
 
 module.exports = {
   createInvoiceController,
+  previewInvoiceController,
   getInvoiceController,
   listInvoicesController,
   refreshInvoiceController,

@@ -136,8 +136,20 @@ function resolveFindManyArgs(filtersOrClient, maybeClient) {
   };
 }
 
-async function findMany(filtersOrClient, maybeClient) {
-  const { filters, client } = resolveFindManyArgs(filtersOrClient, maybeClient);
+function resolvePayoutSort(filters) {
+  const sortColumns = {
+    createdAt: 'p.created_at',
+    updatedAt: 'p.updated_at',
+    amount: 'p.amount_cents',
+    receiver: 'p.receiver',
+    status: 'p.status'
+  };
+  const sortBy = sortColumns[filters.sortBy] || sortColumns.createdAt;
+  const sortDirection = String(filters.sortDirection || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  return `${sortBy} ${sortDirection}`;
+}
+
+function buildFindManyWhere(filters) {
   const clauses = [];
   const params = [];
 
@@ -153,16 +165,64 @@ async function findMany(filtersOrClient, maybeClient) {
     clauses.push('p.risk_decision = ?');
     params.push(filters.riskDecision);
   }
+  if (filters.providerState) {
+    clauses.push('(lower(p.metadata_json) LIKE ? OR lower(pb.status) = ?)');
+    params.push(`%"provider_item_status":"${String(filters.providerState).toLowerCase()}"%`);
+    params.push(String(filters.providerState).toLowerCase());
+  }
+  if (filters.recipient) {
+    clauses.push(
+      '(lower(p.receiver) LIKE ? OR lower(p.id) LIKE ? OR lower(p.sender_batch_id) LIKE ? OR lower(COALESCE(pb.paypal_payout_batch_id, \'\')) LIKE ?)'
+    );
+    const search = `%${String(filters.recipient).toLowerCase()}%`;
+    params.push(search, search, search, search);
+  }
+  if (filters.dateFrom) {
+    clauses.push('p.created_at >= ?');
+    params.push(filters.dateFrom);
+  }
+  if (filters.dateTo) {
+    clauses.push('p.created_at <= ?');
+    params.push(filters.dateTo);
+  }
 
-  const whereClause = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  let sql = `${payoutSelect} ${whereClause} ORDER BY p.created_at DESC`;
-  if (filters.limit) {
+  return {
+    whereClause: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
+    params
+  };
+}
+
+async function findMany(filtersOrClient, maybeClient) {
+  const { filters, client } = resolveFindManyArgs(filtersOrClient, maybeClient);
+  const { whereClause, params } = buildFindManyWhere(filters);
+  let sql = `${payoutSelect} ${whereClause} ORDER BY ${resolvePayoutSort(filters)}`;
+  const limit = filters.pageSize || filters.limit;
+  if (limit) {
     sql += ' LIMIT ?';
-    params.push(filters.limit);
+    params.push(limit);
+  }
+  if (filters.offset) {
+    sql += ' OFFSET ?';
+    params.push(filters.offset);
   }
 
   const rows = await client.all(sql, params);
   return rows.map(mapPayout);
+}
+
+async function countMany(filtersOrClient, maybeClient) {
+  const { filters, client } = resolveFindManyArgs(filtersOrClient, maybeClient);
+  const { whereClause, params } = buildFindManyWhere(filters);
+  const row = await client.get(
+    `
+      SELECT COUNT(*) AS count
+      FROM payouts p
+      LEFT JOIN payout_batches pb ON pb.id = p.payout_batch_id
+      ${whereClause}
+    `,
+    params
+  );
+  return row ? Number(row.count || 0) : 0;
 }
 
 async function findByIdempotencyKey(idempotencyKey, client = db) {
@@ -271,6 +331,7 @@ async function sumUserPayoutsSince(userId, sinceIso, client = db) {
 module.exports = {
   payoutRepository: {
     create,
+    countMany,
     findById,
     findByIdentifier,
     findMany,

@@ -1,4 +1,5 @@
 const { rmSync } = require('node:fs');
+const crypto = require('node:crypto');
 const http = require('node:http');
 const path = require('node:path');
 const assert = require('node:assert/strict');
@@ -16,18 +17,25 @@ process.env.PAYPAL_CLIENT_ID = 'paypal-client-id';
 process.env.PAYPAL_CLIENT_SECRET = 'paypal-client-secret';
 process.env.PAYPAL_ENVIRONMENT = 'sandbox';
 process.env.PAYPAL_WEBHOOK_ID = 'paypal-webhook-id';
+process.env.STRIPE_SECRET_KEY = 'sk_test_transferly';
+process.env.STRIPE_WEBHOOK_SECRET = 'whsec_transferly';
+process.env.STRIPE_API_BASE_URL = 'https://api.stripe.test';
+process.env.STRIPE_PAYOUTS_ENABLED = 'true';
+process.env.CRYPTO_COMMERCE_API_KEY = 'crypto-commerce-key';
+process.env.CRYPTO_COMMERCE_WEBHOOK_SECRET = 'crypto-commerce-webhook-secret';
+process.env.CRYPTO_COMMERCE_API_BASE_URL = 'https://api.commerce.coinbase.test';
 process.env.MAX_SINGLE_PAYOUT = '1000';
 process.env.DAILY_PAYOUT_LIMIT = '5000';
 process.env.MAX_PAYOUTS_PER_HOUR = '5';
 process.env.HIGH_RISK_COUNTRIES = '';
 process.env.HIGH_RISK_CURRENCIES = '';
 process.env.SUSPICIOUS_INVOICE_KEYWORDS = 'crypto,investment';
-process.env.API_RATE_LIMIT_MAX = '120';
+process.env.API_RATE_LIMIT_MAX = '500';
 process.env.API_RATE_LIMIT_WINDOW_MS = '60000';
 process.env.JOB_WAIT_MS = '5000';
 process.env.ADMIN_API_TOKEN = 'admin-secret-token';
 process.env.ADMIN_API_ACTOR_ID = 'admin-api';
-process.env.USER_API_TOKENS = 'demo-user:user-demo-token,secondary-user:user-secondary-token';
+process.env.USER_API_TOKENS = 'demo-user:user-demo-token,secondary-user:user-secondary-token,demo-user:admin-secret-token';
 process.env.SEED_USER_ID = 'demo-user';
 process.env.SEED_USER_EMAIL = 'demo@flashing.local';
 process.env.SEED_USER_NAME = 'Demo User';
@@ -69,6 +77,10 @@ const originalGetQueueOverview = opsService.getQueueOverview;
 const originalListDeadLetterJobs = opsService.listDeadLetterJobs;
 let app;
 let invoiceSequence = 0;
+let stripeInvoiceSequence = 0;
+let stripeAccountSequence = 0;
+let stripeTransferSequence = 0;
+let cryptoChargeSequence = 0;
 const sandboxInvoices = new Map();
 let payoutSequence = 0;
 const sandboxPayouts = new Map();
@@ -174,9 +186,284 @@ function jsonResponse(body, init = {}) {
   });
 }
 
+function normalizeHeaders(headers = {}) {
+  return Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
+}
+
+function createStripeSignature(payload, secret = process.env.STRIPE_WEBHOOK_SECRET) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = crypto.createHmac('sha256', secret).update(`${timestamp}.${payload}`, 'utf8').digest('hex');
+  return `t=${timestamp},v1=${signature}`;
+}
+
+function createCoinbaseSignature(payload, headers, secret = process.env.CRYPTO_COMMERCE_WEBHOOK_SECRET) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const headerNames = 'content-type x-hook0-id';
+  const normalizedHeaders = normalizeHeaders(headers);
+  const headerValues = headerNames
+    .split(' ')
+    .map((name) => normalizedHeaders[name] || '')
+    .join('.');
+  const signature = crypto
+    .createHmac('sha256', secret)
+    .update(`${timestamp}.${headerNames}.${headerValues}.${payload}`, 'utf8')
+    .digest('hex');
+  return `t=${timestamp},h=${headerNames},v1=${signature}`;
+}
+
 function installFetchStub() {
   global.fetch = async (input, init = {}) => {
     const url = new URL(typeof input === 'string' ? input : input.url);
+    const headers = normalizeHeaders(init.headers || {});
+
+    if (url.hostname === 'api.stripe.test') {
+      assert.equal(headers.authorization, 'Bearer sk_test_transferly');
+      assert.equal(headers['stripe-version'], '2026-02-25.clover');
+      if ((init.method || 'GET') !== 'GET' && url.pathname !== '/v1/account_links') {
+        assert.ok(headers['idempotency-key']);
+      }
+
+      if (url.pathname === '/v1/balance' && (init.method || 'GET') === 'GET') {
+        return jsonResponse({
+          object: 'balance',
+          livemode: false,
+          available: [
+            {
+              amount: 125000,
+              currency: 'usd',
+              source_types: {
+                card: 125000
+              }
+            }
+          ],
+          pending: [
+            {
+              amount: 25000,
+              currency: 'usd',
+              source_types: {
+                card: 25000
+              }
+            }
+          ],
+          instant_available: []
+        });
+      }
+
+      if (url.pathname === '/v1/accounts' && init.method === 'POST') {
+        const body = new URLSearchParams(init.body);
+        stripeAccountSequence += 1;
+        assert.equal(body.get('country'), 'US');
+        assert.equal(body.get('email'), 'recipient@example.com');
+        assert.equal(body.get('capabilities[transfers][requested]'), 'true');
+        return jsonResponse({
+          id: `acct_connected_${String(stripeAccountSequence).padStart(3, '0')}`,
+          object: 'account',
+          business_type: body.get('business_type') || 'individual',
+          charges_enabled: false,
+          country: body.get('country'),
+          details_submitted: false,
+          email: body.get('email'),
+          livemode: false,
+          payouts_enabled: false,
+          requirements: {
+            currently_due: ['individual.first_name'],
+            past_due: [],
+            disabled_reason: null
+          },
+          capabilities: {
+            transfers: 'pending'
+          }
+        });
+      }
+
+      if (url.pathname.startsWith('/v1/accounts/acct_connected_') && init.method === 'GET') {
+        const accountId = url.pathname.split('/').pop();
+        return jsonResponse({
+          id: accountId,
+          object: 'account',
+          business_type: 'individual',
+          charges_enabled: true,
+          country: 'US',
+          details_submitted: true,
+          email: 'recipient@example.com',
+          livemode: false,
+          payouts_enabled: true,
+          requirements: {
+            currently_due: [],
+            past_due: [],
+            disabled_reason: null
+          },
+          capabilities: {
+            transfers: 'active'
+          }
+        });
+      }
+
+      if (url.pathname === '/v1/account_links' && init.method === 'POST') {
+        const body = new URLSearchParams(init.body);
+        assert.ok(body.get('account').startsWith('acct_connected_'));
+        assert.equal(body.get('type'), 'account_onboarding');
+        assert.ok(body.get('return_url').startsWith('http'));
+        assert.ok(body.get('refresh_url').startsWith('http'));
+        return jsonResponse({
+          object: 'account_link',
+          created: 1773350400,
+          expires_at: 1773354000,
+          url: `https://connect.stripe.test/setup/${body.get('account')}`
+        });
+      }
+
+      if (url.pathname === '/v1/transfers' && init.method === 'POST') {
+        const body = new URLSearchParams(init.body);
+        stripeTransferSequence += 1;
+        assert.equal(body.get('amount'), '3500');
+        assert.equal(body.get('currency'), 'usd');
+        assert.equal(body.get('destination'), 'acct_connected_001');
+        assert.equal(body.get('metadata[transferly_user_id]'), 'demo-user');
+        return jsonResponse({
+          id: `tr_transferly_${stripeTransferSequence}`,
+          object: 'transfer',
+          amount: Number(body.get('amount')),
+          amount_reversed: 0,
+          currency: body.get('currency'),
+          destination: body.get('destination'),
+          destination_payment: `py_transferly_${stripeTransferSequence}`,
+          livemode: false,
+          metadata: {
+            transferly_payout_id: body.get('metadata[transferly_payout_id]'),
+            transferly_user_id: body.get('metadata[transferly_user_id]')
+          },
+          reversed: false,
+          transfer_group: body.get('transfer_group')
+        });
+      }
+
+      if (url.pathname.startsWith('/v1/transfers/tr_transferly_') && init.method === 'GET') {
+        const transferId = url.pathname.split('/').pop();
+        return jsonResponse({
+          id: transferId,
+          object: 'transfer',
+          amount: 3500,
+          amount_reversed: 0,
+          currency: 'usd',
+          destination: 'acct_connected_001',
+          destination_payment: 'py_transferly_1',
+          livemode: false,
+          metadata: {},
+          reversed: false
+        });
+      }
+
+      if (url.pathname === '/v1/customers' && init.method === 'POST') {
+        const body = new URLSearchParams(init.body);
+        assert.equal(body.get('email'), 'buyer@example.com');
+        return jsonResponse({ id: 'cus_transferly_001', object: 'customer' });
+      }
+
+      if (url.pathname === '/v1/invoiceitems' && init.method === 'POST') {
+        const body = new URLSearchParams(init.body);
+        assert.equal(body.get('customer'), 'cus_transferly_001');
+        assert.equal(body.get('amount'), '12500');
+        assert.equal(body.get('currency'), 'usd');
+        return jsonResponse({ id: 'ii_transferly_001', object: 'invoiceitem' });
+      }
+
+      if (url.pathname === '/v1/invoices' && init.method === 'POST') {
+        const body = new URLSearchParams(init.body);
+        stripeInvoiceSequence += 1;
+        assert.equal(body.get('customer'), 'cus_transferly_001');
+        assert.equal(body.get('collection_method'), 'send_invoice');
+        assert.ok(Number(body.get('days_until_due')) >= 1);
+        return jsonResponse({ id: `in_transferly_${stripeInvoiceSequence}`, object: 'invoice', status: 'draft' });
+      }
+
+      if (url.pathname.startsWith('/v1/invoices/in_transferly_') && url.pathname.endsWith('/finalize') && init.method === 'POST') {
+        const invoiceId = url.pathname.split('/')[3];
+        return jsonResponse({
+          id: invoiceId,
+          object: 'invoice',
+          number: 'ST-0001',
+          status: 'open',
+          hosted_invoice_url: `https://invoice.stripe.test/${invoiceId}`,
+          invoice_pdf: `https://invoice.stripe.test/${invoiceId}.pdf`
+        });
+      }
+
+      if (url.pathname.startsWith('/v1/invoices/in_transferly_') && url.pathname.endsWith('/send') && init.method === 'POST') {
+        const invoiceId = url.pathname.split('/')[3];
+        return jsonResponse({
+          id: invoiceId,
+          object: 'invoice',
+          number: 'ST-0001',
+          status: 'open',
+          hosted_invoice_url: `https://invoice.stripe.test/${invoiceId}`,
+          invoice_pdf: `https://invoice.stripe.test/${invoiceId}.pdf`
+        });
+      }
+
+      if (url.pathname.startsWith('/v1/invoices/in_transferly_') && url.pathname.endsWith('/void') && init.method === 'POST') {
+        const invoiceId = url.pathname.split('/')[3];
+        return jsonResponse({
+          id: invoiceId,
+          object: 'invoice',
+          number: 'ST-0001',
+          status: 'void',
+          hosted_invoice_url: `https://invoice.stripe.test/${invoiceId}`,
+          invoice_pdf: `https://invoice.stripe.test/${invoiceId}.pdf`
+        });
+      }
+
+      if (url.pathname.startsWith('/v1/invoices/in_transferly_') && init.method === 'GET') {
+        const invoiceId = url.pathname.split('/').pop();
+        return jsonResponse({
+          id: invoiceId,
+          object: 'invoice',
+          number: 'ST-0001',
+          status: 'paid',
+          hosted_invoice_url: `https://invoice.stripe.test/${invoiceId}`,
+          invoice_pdf: `https://invoice.stripe.test/${invoiceId}.pdf`,
+          status_transitions: {
+            paid_at: 1773350400
+          }
+        });
+      }
+
+      throw new Error(`Unhandled Stripe fetch stub for ${init.method || 'GET'} ${url.toString()}`);
+    }
+
+    if (url.hostname === 'api.commerce.coinbase.test') {
+      assert.equal(headers['x-cc-api-key'], 'crypto-commerce-key');
+
+      if (url.pathname === '/charges' && init.method === 'POST') {
+        const body = init.body ? JSON.parse(init.body) : {};
+        cryptoChargeSequence += 1;
+        assert.equal(body.pricing_type, 'fixed_price');
+        assert.equal(body.local_price.amount, '125.00');
+        assert.equal(body.local_price.currency, 'USD');
+        return jsonResponse({
+          data: {
+            id: `charge-transferly-${cryptoChargeSequence}`,
+            code: `CHARGE${cryptoChargeSequence}`,
+            hosted_url: `https://commerce.coinbase.test/charges/CHARGE${cryptoChargeSequence}`,
+            timeline: [{ status: 'NEW' }]
+          }
+        });
+      }
+
+      if (url.pathname.startsWith('/charges/') && init.method === 'GET') {
+        const chargeId = url.pathname.split('/').pop();
+        return jsonResponse({
+          data: {
+            id: chargeId,
+            code: chargeId.startsWith('CHARGE') ? chargeId : 'CHARGE1',
+            hosted_url: 'https://commerce.coinbase.test/charges/CHARGE1',
+            timeline: [{ status: 'NEW' }, { status: 'CONFIRMED' }]
+          }
+        });
+      }
+
+      throw new Error(`Unhandled Coinbase Commerce fetch stub for ${init.method || 'GET'} ${url.toString()}`);
+    }
 
     if (url.hostname !== 'api-m.sandbox.paypal.com') {
       return originalFetch(input, init);
@@ -532,6 +819,30 @@ function bearerHeaders(token, headers = {}) {
   };
 }
 
+function decodeDataUrl(dataUrl, prefix) {
+  assert.ok(dataUrl.startsWith(prefix), `Expected data URL prefix ${prefix}`);
+  return Buffer.from(dataUrl.slice(prefix.length), 'base64').toString('utf8');
+}
+
+function assertReceiptArtifactsInclude(result, expectedText) {
+  const svg = decodeDataUrl(result.image_data_url, 'data:image/svg+xml;base64,');
+  const pdf = decodeDataUrl(result.pdf_data_url, 'data:application/pdf;base64,');
+
+  assert.ok(svg.includes(expectedText), `Expected SVG receipt artifact to include "${expectedText}"`);
+  assert.ok(pdf.includes(expectedText), `Expected PDF receipt artifact to include "${expectedText}"`);
+}
+
+function assertReceiptLayout(result, providerName, category) {
+  const notice = `Transferly generated record. Not an official ${providerName} receipt.`;
+
+  assert.equal(result.receipt.data.layout.provider_name, providerName);
+  assert.equal(result.receipt.data.layout.category, category);
+  assert.equal(result.receipt.data.layout.notice, notice);
+  assertReceiptArtifactsInclude(result, providerName);
+  assertReceiptArtifactsInclude(result, category);
+  assertReceiptArtifactsInclude(result, notice);
+}
+
 async function resetDatabase() {
   await db.exec(`
     DELETE FROM telegram_command_logs;
@@ -545,6 +856,7 @@ async function resetDatabase() {
     DELETE FROM receipts;
     DELETE FROM payouts;
     DELETE FROM payout_batches;
+    DELETE FROM stripe_connected_accounts;
     DELETE FROM invoices;
     DELETE FROM audit_logs;
     DELETE FROM webhook_events;
@@ -569,6 +881,10 @@ beforeEach(async () => {
   opsService.listDeadLetterJobs = originalListDeadLetterJobs;
   await resetDatabase();
   invoiceSequence = 0;
+  stripeInvoiceSequence = 0;
+  stripeAccountSequence = 0;
+  stripeTransferSequence = 0;
+  cryptoChargeSequence = 0;
   sandboxInvoices.clear();
   payoutSequence = 0;
   sandboxPayouts.clear();
@@ -633,7 +949,7 @@ describe('API integration flows', () => {
     assert.ok(Array.isArray(body.testimonials));
   });
 
-  test('GET /api/me requires a user bearer token and returns the current user snapshot', async () => {
+  test('GET /api/me requires a user identity and returns the current user snapshot', async () => {
     const unauthorizedResponse = await injectRequest(app, {
       method: 'GET',
       url: '/api/me'
@@ -674,6 +990,15 @@ describe('API integration flows', () => {
     assert.equal(body.receipts.length, 1);
     assert.equal(body.referrals.user_id, 'demo-user');
     assert.ok(Array.isArray(body.topUpOrders));
+
+    const adminSessionResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/me',
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(adminSessionResponse.status, 200);
+    assert.equal(adminSessionResponse.json().user.id, 'demo-user');
   });
 
   test('top-up order endpoints persist user funding orders and require admin completion for point credit', async () => {
@@ -1254,6 +1579,207 @@ describe('API integration flows', () => {
     assert.ok(invoice.dueDate);
   });
 
+  test('POST /api/invoices/preview calculates draft totals and hosted-link intent without creating PayPal state', async () => {
+    const template = await invoiceTemplateRepository.create({
+      name: 'Preview Template',
+      description: 'Preview-only invoice',
+      currency_code: 'USD',
+      default_due_days: 10,
+      line_items: [
+        {
+          name: 'Implementation',
+          description: 'Preview phase',
+          quantity: 2,
+          unitAmount: 125
+        }
+      ],
+      is_active: true
+    });
+
+    const payload = JSON.stringify({
+      userId: 'demo-user',
+      recipientEmail: 'buyer@example.com',
+      templateId: template.id
+    });
+
+    const response = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/invoices/preview',
+      headers: jsonHeaders(payload, bearerHeaders(userTokens.demoUser)),
+      body: payload
+    });
+
+    assert.equal(response.status, 200);
+    const preview = response.json();
+    assert.equal(preview.template.id, template.id);
+    assert.equal(preview.total, '250.00');
+    assert.equal(preview.amount_cents, 25000);
+    assert.equal(preview.line_items.length, 1);
+    assert.equal(preview.hosted_link_will_be_created, true);
+    assert.equal(sandboxInvoices.size, 0);
+  });
+
+  test('POST /api/invoices/preview supports configured Stripe invoice previews without provider state', async () => {
+    const payload = JSON.stringify({
+      userId: 'demo-user',
+      provider: 'stripe',
+      recipientEmail: 'buyer@example.com',
+      currency: 'USD',
+      description: 'Stripe consulting retainer',
+      items: [
+        {
+          name: 'Consulting',
+          description: 'Stripe preview',
+          quantity: 1,
+          unitAmount: 125
+        }
+      ]
+    });
+
+    const response = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/invoices/preview',
+      headers: jsonHeaders(payload, bearerHeaders(userTokens.demoUser)),
+      body: payload
+    });
+
+    assert.equal(response.status, 200);
+    const preview = response.json();
+    assert.equal(preview.provider, 'stripe');
+    assert.equal(preview.provider_status, 'configured');
+    assert.deepEqual(preview.missing_env, []);
+    assert.equal(preview.total, '125.00');
+    assert.equal(preview.hosted_link_will_be_created, true);
+    assert.equal(preview.settlement_review_required, false);
+    assert.equal(stripeInvoiceSequence, 0);
+  });
+
+  test('GET /api/admin/payment-providers/stripe/balance returns normalized Stripe balances', async () => {
+    const response = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/payment-providers/stripe/balance',
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(response.status, 200);
+    const body = response.json();
+    assert.equal(body.balance.provider, 'stripe');
+    assert.equal(body.balance.mode, 'platform');
+    assert.equal(body.balance.livemode, false);
+    assert.deepEqual(body.balance.available[0], {
+      amount_cents: 125000,
+      amount: '1250.00',
+      currency: 'USD',
+      source_types: {
+        card: 125000
+      }
+    });
+    assert.equal(body.balance.pending[0].amount, '250.00');
+  });
+
+  test('admin can create, onboard, refresh, and webhook-sync a Stripe connected account', async () => {
+    const createPayload = JSON.stringify({
+      userId: 'demo-user',
+      email: 'recipient@example.com',
+      country: 'US',
+      businessType: 'individual',
+      metadata: {
+        operator_note: 'sandbox recipient'
+      }
+    });
+
+    const createResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/admin/payment-providers/stripe/connected-accounts',
+      headers: jsonHeaders(createPayload, bearerHeaders(adminToken)),
+      body: createPayload
+    });
+
+    assert.equal(createResponse.status, 201);
+    const created = createResponse.json().account;
+    assert.equal(created.stripe_account_id, 'acct_connected_001');
+    assert.equal(created.user_id, 'demo-user');
+    assert.equal(created.status, 'onboarding_required');
+    assert.equal(created.requirements.currently_due[0], 'individual.first_name');
+
+    const linkPayload = JSON.stringify({
+      returnUrl: 'http://localhost:3001/admin/stripe/return',
+      refreshUrl: 'http://localhost:3001/admin/stripe/refresh'
+    });
+    const linkResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/admin/payment-providers/stripe/connected-accounts/${created.id}/onboarding-link`,
+      headers: jsonHeaders(linkPayload, bearerHeaders(adminToken)),
+      body: linkPayload
+    });
+
+    assert.equal(linkResponse.status, 201);
+    const linkBody = linkResponse.json();
+    assert.equal(linkBody.onboarding_link.url, 'https://connect.stripe.test/setup/acct_connected_001');
+    assert.ok(linkBody.account.last_onboarding_link_created_at);
+
+    const refreshResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/admin/payment-providers/stripe/connected-accounts/${created.id}/refresh`,
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(refreshResponse.status, 200);
+    assert.equal(refreshResponse.json().account.status, 'ready');
+    assert.equal(refreshResponse.json().account.payouts_enabled, true);
+
+    const webhookPayload = JSON.stringify({
+      id: 'evt_stripe_account_updated_1',
+      type: 'account.updated',
+      object: 'event',
+      data: {
+        object: {
+          id: 'acct_connected_001',
+          object: 'account',
+          business_type: 'individual',
+          charges_enabled: false,
+          country: 'US',
+          details_submitted: true,
+          email: 'recipient@example.com',
+          livemode: false,
+          payouts_enabled: false,
+          requirements: {
+            currently_due: ['external_account'],
+            past_due: [],
+            disabled_reason: 'requirements.pending_verification'
+          },
+          capabilities: {
+            transfers: 'pending'
+          }
+        }
+      }
+    });
+
+    const webhookResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/stripe',
+      headers: jsonHeaders(webhookPayload, {
+        'stripe-signature': createStripeSignature(webhookPayload)
+      }),
+      body: webhookPayload
+    });
+
+    assert.equal(webhookResponse.status, 202);
+
+    const listResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/payment-providers/stripe/connected-accounts?userId=demo-user',
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(listResponse.status, 200);
+    const accounts = listResponse.json().data;
+    assert.equal(accounts.length, 1);
+    assert.equal(accounts[0].stripe_account_id, 'acct_connected_001');
+    assert.equal(accounts[0].status, 'restricted');
+    assert.equal(accounts[0].disabled_reason, 'requirements.pending_verification');
+  });
+
   test('POST /api/invoices returns the PayPal payment link and persists the invoice', async () => {
     const payload = JSON.stringify({
       userId: 'demo-user',
@@ -1287,6 +1813,89 @@ describe('API integration flows', () => {
     assert.ok(invoice);
     assert.equal(invoice.invoiceUrl, body.invoice_link);
     assert.equal(invoice.amountCents, 12500);
+  });
+
+  test('POST /api/invoices can create and persist an official Stripe hosted invoice', async () => {
+    const payload = JSON.stringify({
+      userId: 'demo-user',
+      provider: 'stripe',
+      recipientEmail: 'buyer@example.com',
+      currency: 'USD',
+      description: 'Stripe consulting retainer',
+      dueDate: '2099-01-15T00:00:00.000Z',
+      items: [
+        {
+          name: 'Consulting',
+          description: 'April retainer',
+          quantity: 1,
+          unitAmount: 125
+        }
+      ]
+    });
+
+    const response = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/invoices',
+      headers: jsonHeaders(payload, bearerHeaders(userTokens.demoUser)),
+      body: payload
+    });
+
+    assert.equal(response.status, 201);
+    const body = response.json();
+    assert.equal(body.invoice_id, 'in_transferly_1');
+    assert.equal(body.status, 'SENT');
+    assert.equal(body.invoice_link, 'https://invoice.stripe.test/in_transferly_1');
+    assert.equal(body.metadata.provider, 'stripe');
+    assert.equal(body.metadata.provider_resource, 'invoice');
+    assert.equal(body.metadata.invoice_pdf, 'https://invoice.stripe.test/in_transferly_1.pdf');
+
+    const invoice = await invoiceRepository.findByPaypalInvoiceId('in_transferly_1');
+    assert.ok(invoice);
+    assert.equal(invoice.invoiceUrl, body.invoice_link);
+    assert.equal(invoice.amountCents, 12500);
+    assert.equal(invoice.metadata.provider, 'stripe');
+    assert.equal(invoice.paypalDetails.provider, 'stripe');
+  });
+
+  test('POST /api/invoices can create hosted crypto charges with settlement safeguards', async () => {
+    const payload = JSON.stringify({
+      userId: 'demo-user',
+      provider: 'crypto',
+      recipientEmail: 'buyer@example.com',
+      currency: 'USD',
+      description: 'Crypto settlement invoice',
+      items: [
+        {
+          name: 'Settlement',
+          description: 'Crypto charge',
+          quantity: 1,
+          unitAmount: 125
+        }
+      ]
+    });
+
+    const response = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/invoices',
+      headers: jsonHeaders(payload, bearerHeaders(userTokens.demoUser)),
+      body: payload
+    });
+
+    assert.equal(response.status, 201);
+    const body = response.json();
+    assert.equal(body.invoice_id, 'charge-transferly-1');
+    assert.equal(body.status, 'SENT');
+    assert.equal(body.invoice_link, 'https://commerce.coinbase.test/charges/CHARGE1');
+    assert.equal(body.metadata.provider, 'crypto');
+    assert.equal(body.metadata.provider_resource, 'crypto_charge');
+    assert.equal(body.metadata.settlement_review_required, true);
+    assert.ok(body.metadata.settlement_safeguards.includes('underpayment_detection'));
+
+    const invoice = await invoiceRepository.findByPaypalInvoiceId('charge-transferly-1');
+    assert.ok(invoice);
+    assert.equal(invoice.invoiceUrl, body.invoice_link);
+    assert.equal(invoice.metadata.provider, 'crypto');
+    assert.equal(invoice.paypalDetails.provider, 'crypto');
   });
 
   test('POST /api/invoices schedules the official PayPal send when issueDate is in the future', async () => {
@@ -1725,6 +2334,17 @@ describe('API integration flows', () => {
       headers: bearerHeaders(userTokens.demoUser)
     });
 
+    const notePayload = JSON.stringify({ note: 'Customer asked for a corrected PO number.' });
+    const noteResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/admin/invoices/${createdInvoice.internal_invoice_id}/notes`,
+      headers: jsonHeaders(notePayload, bearerHeaders(adminToken)),
+      body: notePayload
+    });
+
+    assert.equal(noteResponse.status, 201);
+    assert.equal(noteResponse.json().note, 'Customer asked for a corrected PO number.');
+
     const timelineResponse = await injectRequest(app, {
       method: 'GET',
       url: `/api/invoices/${createdInvoice.internal_invoice_id}/timeline?limit=10`,
@@ -1736,6 +2356,7 @@ describe('API integration flows', () => {
     assert.ok(Array.isArray(timelineBody.data));
     assert.ok(timelineBody.data.some((entry) => entry.action === 'invoice.created'));
     assert.ok(timelineBody.data.some((entry) => entry.action === 'invoice.reminder_sent'));
+    assert.ok(timelineBody.data.some((entry) => entry.action === 'invoice.note_added'));
   });
 
   test('auth register/login, points lookup, receipt generation, email dispatch, referral stats, and telegram webhook all work through the new SlipCraft endpoints', async () => {
@@ -1876,11 +2497,414 @@ describe('API integration flows', () => {
     assert.equal(telegramBody.command, '/balance');
     assert.equal(telegramBody.response.data.points, 40);
 
+    const telegramGeneratePayload = JSON.stringify({
+      update_id: 2,
+      message: {
+        text: '/generate_receipt bank {"service":"opay","amount":"25.00"}',
+        chat: {
+          id: 'tg-chat-1'
+        },
+        from: {
+          id: 'tg-user-1',
+          username: 'slipcraft_bot_user',
+          first_name: 'Slip',
+          last_name: 'Craft'
+        }
+      }
+    });
+
+    const telegramGenerateResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/telegram/webhook',
+      headers: jsonHeaders(telegramGeneratePayload, {
+        'x-telegram-bot-api-secret-token': ''
+      }),
+      body: telegramGeneratePayload
+    });
+
+    assert.equal(telegramGenerateResponse.status, 200);
+    const telegramGenerateBody = telegramGenerateResponse.json();
+    assert.equal(telegramGenerateBody.command, '/generate_receipt');
+    assert.equal(telegramGenerateBody.response.data.receipt.data.details.service, 'opay');
+
+    const telegramHistoryPayload = JSON.stringify({
+      update_id: 3,
+      message: {
+        text: '/history opay',
+        chat: {
+          id: 'tg-chat-1'
+        },
+        from: {
+          id: 'tg-user-1',
+          username: 'slipcraft_bot_user',
+          first_name: 'Slip',
+          last_name: 'Craft'
+        }
+      }
+    });
+
+    const telegramHistoryResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/telegram/webhook',
+      headers: jsonHeaders(telegramHistoryPayload, {
+        'x-telegram-bot-api-secret-token': ''
+      }),
+      body: telegramHistoryPayload
+    });
+
+    assert.equal(telegramHistoryResponse.status, 200);
+    const telegramHistoryBody = telegramHistoryResponse.json();
+    assert.equal(telegramHistoryBody.command, '/history');
+    assert.equal(telegramHistoryBody.response.data.length, 1);
+    assert.equal(telegramHistoryBody.response.data[0].data.details.service, 'opay');
+
     const receipt = await receiptRepository.findById(receiptBody.receipt.id);
     assert.equal(receipt.status, 'EMAILED');
 
     const profile = await profileRepository.findByUserId(registerBody.user.id);
-    assert.equal(profile.points, 40);
+    assert.equal(profile.points, 30);
+  });
+
+  test('telegram receipt webhook preserves Transferly service-specific details and filters history by service', async () => {
+    await profileRepository.updateByUserId('demo-user', { points: 500 });
+    await telegramRepository.upsertAccount({
+      userId: 'demo-user',
+      telegramUserId: 'tg-transferly-services',
+      chatId: 'tg-transferly-services-chat',
+      username: 'transferly_services_user',
+      firstName: 'Transferly',
+      lastName: 'Services'
+    });
+
+    const serviceRequests = [
+      {
+        type: 'bank',
+        providerName: 'Opay',
+        category: 'Bank Slip Record',
+        details: {
+          service: 'opay',
+          amount: '25.00',
+          sender_name: 'Ada Sender',
+          receiver_name: 'Ben Receiver',
+          opay_transaction_id: 'OPAY-001'
+        },
+        artifactChecks: [
+          ['Opay Transaction ID', 'OPAY-001']
+        ]
+      },
+      {
+        type: 'bank',
+        providerName: 'Kuda',
+        category: 'Bank Slip Record',
+        details: {
+          service: 'kuda',
+          amount: '32.00',
+          sender_name: 'Kuda Sender',
+          beneficiary_name: 'Kuda Receiver',
+          kuda_reference: 'KUDA-001'
+        },
+        artifactChecks: [
+          ['Kuda Reference', 'KUDA-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Binance',
+        category: 'Crypto Transfer Record',
+        details: {
+          service: 'binance',
+          recipient_email: 'binance@example.com',
+          amount: '75.50',
+          currency: 'USDT',
+          network: 'TRC20',
+          transaction_id: 'BINANCE-001'
+        },
+        artifactChecks: [
+          ['Recipient Email', 'binance@example.com'],
+          ['Transaction ID', 'BINANCE-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Bybit',
+        category: 'Crypto Transfer Record',
+        details: {
+          service: 'bybit',
+          recipient_email: 'bybit@example.com',
+          amount: '81.00',
+          currency: 'USDT',
+          order_id: 'BYBIT-ORDER-001',
+          transaction_id: 'BYBIT-TXN-001'
+        },
+        artifactChecks: [
+          ['Order ID', 'BYBIT-ORDER-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Coinbase',
+        category: 'Crypto Transfer Record',
+        details: {
+          service: 'coinbase',
+          recipient_email: 'coinbase@example.com',
+          amount: '44.25',
+          currency: 'USD',
+          transaction_hash: 'COINBASE-HASH-001'
+        },
+        artifactChecks: [
+          ['Transaction Hash', 'COINBASE-HASH-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'PayPal',
+        category: 'Payment Record',
+        details: {
+          service: 'paypal',
+          mode: 'flash_email',
+          recipient_email: 'paypal@example.com',
+          amount: '19.99',
+          currency: 'USD',
+          invoice_or_transaction_id: 'PAYPAL-INV-001',
+          payment_status: 'COMPLETED'
+        },
+        artifactChecks: [
+          ['Invoice Or Transaction ID', 'PAYPAL-INV-001'],
+          ['Payment Status', 'COMPLETED']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Crypto.com',
+        category: 'Crypto Transfer Record',
+        details: {
+          service: 'crypto-com',
+          recipient_email: 'cryptocom@example.com',
+          amount: '64.10',
+          currency: 'USD',
+          transaction_id: 'CRYPTOCOM-001'
+        },
+        artifactChecks: [
+          ['Transaction ID', 'CRYPTOCOM-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Wise',
+        category: 'Transfer Record',
+        details: {
+          service: 'wise',
+          recipient_email: 'wise@example.com',
+          amount: '120.00',
+          currency: 'GBP',
+          transfer_number: 'WISE-001'
+        },
+        artifactChecks: [
+          ['Transfer Number', 'WISE-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Cash App',
+        category: 'Payment Record',
+        details: {
+          service: 'cash-app',
+          recipient: '$cashrecipient',
+          amount: '42.00',
+          currency: 'USD',
+          cashtag_or_reference: 'CASHAPP-001'
+        },
+        artifactChecks: [
+          ['Cashtag Or Reference', 'CASHAPP-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Zelle',
+        category: 'Payment Record',
+        details: {
+          service: 'zelle',
+          recipient_email: 'zelle@example.com',
+          amount: '58.00',
+          currency: 'USD',
+          confirmation_id: 'ZELLE-001'
+        },
+        artifactChecks: [
+          ['Confirmation ID', 'ZELLE-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Venmo',
+        category: 'Payment Record',
+        details: {
+          service: 'venmo',
+          recipient: '@venmorecipient',
+          amount: '61.00',
+          currency: 'USD',
+          transaction_id: 'VENMO-001'
+        },
+        artifactChecks: [
+          ['Transaction ID', 'VENMO-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Trust Wallet',
+        category: 'Wallet Transfer Record',
+        details: {
+          service: 'trust-wallet',
+          wallet_address: '0x1234567890abcdef',
+          amount: '90.00',
+          currency: 'USDT',
+          network: 'ERC20',
+          transaction_hash: 'TRUST-HASH-001'
+        },
+        artifactChecks: [
+          ['Wallet Address', '0x1234567890abcdef'],
+          ['Transaction Hash', 'TRUST-HASH-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'GCash',
+        category: 'Mobile Wallet Record',
+        details: {
+          service: 'gcash',
+          recipient: 'GCash Receiver',
+          amount: '1500.00',
+          currency: 'PHP',
+          reference_number: 'GCASH-001'
+        },
+        artifactChecks: [
+          ['Reference Number', 'GCASH-001']
+        ]
+      },
+      {
+        type: 'email',
+        providerName: 'Crypto',
+        category: 'Blockchain Receipt Record',
+        details: {
+          service: 'crypto-receipts',
+          wallet_address: 'TTransferlyWallet001',
+          amount: '100.00',
+          currency: 'USDT',
+          network: 'TRC20',
+          transaction_hash: 'CRYPTO-HASH-001'
+        },
+        artifactChecks: [
+          ['Wallet Address', 'TTransferlyWallet001'],
+          ['Transaction Hash', 'CRYPTO-HASH-001']
+        ]
+      }
+    ];
+
+    for (const [index, serviceRequest] of serviceRequests.entries()) {
+      const telegramPayload = JSON.stringify({
+        update_id: 3000 + index,
+        message: {
+          text: `/generate_receipt ${serviceRequest.type} ${JSON.stringify(serviceRequest.details)}`,
+          chat: {
+            id: 'tg-transferly-services-chat'
+          },
+          from: {
+            id: 'tg-transferly-services',
+            username: 'transferly_services_user',
+            first_name: 'Transferly',
+            last_name: 'Services'
+          }
+        }
+      });
+
+      const response = await injectRequest(app, {
+        method: 'POST',
+        url: '/api/telegram/webhook',
+        headers: jsonHeaders(telegramPayload, {
+          'x-telegram-bot-api-secret-token': ''
+        }),
+        body: telegramPayload
+      });
+
+      assert.equal(response.status, 200);
+      const body = response.json();
+      assert.equal(body.command, '/generate_receipt');
+      assert.equal(body.response.data.receipt.data.details.service, serviceRequest.details.service);
+      assertReceiptLayout(body.response.data, serviceRequest.providerName, serviceRequest.category);
+
+      for (const [key, value] of Object.entries(serviceRequest.details)) {
+        assert.equal(body.response.data.receipt.data.details[key], value);
+      }
+
+      for (const [label, value] of serviceRequest.artifactChecks) {
+        assert.ok(
+          body.response.data.receipt.data.fields.some((field) => field.label === label && field.value === value)
+        );
+        assertReceiptArtifactsInclude(body.response.data, label);
+        assertReceiptArtifactsInclude(body.response.data, value);
+      }
+    }
+
+    const paypalHistoryPayload = JSON.stringify({
+      update_id: 4000,
+      message: {
+        text: '/history paypal',
+        chat: {
+          id: 'tg-transferly-services-chat'
+        },
+        from: {
+          id: 'tg-transferly-services',
+          username: 'transferly_services_user',
+          first_name: 'Transferly',
+          last_name: 'Services'
+        }
+      }
+    });
+
+    const paypalHistoryResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/telegram/webhook',
+      headers: jsonHeaders(paypalHistoryPayload, {
+        'x-telegram-bot-api-secret-token': ''
+      }),
+      body: paypalHistoryPayload
+    });
+
+    assert.equal(paypalHistoryResponse.status, 200);
+    const paypalHistoryBody = paypalHistoryResponse.json();
+    assert.equal(paypalHistoryBody.response.data.length, 1);
+    assert.equal(paypalHistoryBody.response.data[0].data.details.service, 'paypal');
+    assert.equal(paypalHistoryBody.response.data[0].data.details.invoice_or_transaction_id, 'PAYPAL-INV-001');
+
+    const cryptoHistoryPayload = JSON.stringify({
+      update_id: 4001,
+      message: {
+        text: '/history crypto-receipts',
+        chat: {
+          id: 'tg-transferly-services-chat'
+        },
+        from: {
+          id: 'tg-transferly-services',
+          username: 'transferly_services_user',
+          first_name: 'Transferly',
+          last_name: 'Services'
+        }
+      }
+    });
+
+    const cryptoHistoryResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/telegram/webhook',
+      headers: jsonHeaders(cryptoHistoryPayload, {
+        'x-telegram-bot-api-secret-token': ''
+      }),
+      body: cryptoHistoryPayload
+    });
+
+    assert.equal(cryptoHistoryResponse.status, 200);
+    const cryptoHistoryBody = cryptoHistoryResponse.json();
+    assert.equal(cryptoHistoryBody.response.data.length, 1);
+    assert.equal(cryptoHistoryBody.response.data[0].data.details.service, 'crypto-receipts');
+    assert.equal(cryptoHistoryBody.response.data[0].data.details.transaction_hash, 'CRYPTO-HASH-001');
   });
 
   test('user-scoped invoice access blocks cross-account reads and lists only owned records', async () => {
@@ -1953,6 +2977,40 @@ describe('API integration flows', () => {
     const listBody = demoList.json();
     assert.equal(listBody.data.length, 1);
     assert.equal(listBody.data[0].internal_invoice_id, demoInvoice.internal_invoice_id);
+
+    const filteredList = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/invoices?recipient=demo-buyer&pageSize=1&sortBy=recipient&sortDirection=asc',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(filteredList.status, 200);
+    const filteredBody = filteredList.json();
+    assert.equal(filteredBody.data.length, 1);
+    assert.equal(filteredBody.data[0].internal_invoice_id, demoInvoice.internal_invoice_id);
+    assert.deepEqual(filteredBody.pagination, {
+      page: 1,
+      page_size: 1,
+      total: 1,
+      has_next_page: false
+    });
+
+    const adminInvoiceList = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/invoices?recipient=buyer&pageSize=1&sortBy=recipient&sortDirection=asc',
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(adminInvoiceList.status, 200);
+    const adminInvoiceBody = adminInvoiceList.json();
+    assert.equal(adminInvoiceBody.data.length, 1);
+    assert.equal(adminInvoiceBody.data[0].user_id, 'demo-user');
+    assert.deepEqual(adminInvoiceBody.pagination, {
+      page: 1,
+      page_size: 1,
+      total: 2,
+      has_next_page: true
+    });
   });
 
   test('payout review and approval flow settles reserved funds after admin approval', async () => {
@@ -2013,6 +3071,33 @@ describe('API integration flows', () => {
       payout_fee_percentage_bps: 100,
       payout_manual_review_cents: 2000
     });
+
+    const previewPayload = JSON.stringify({
+      userId: 'demo-user',
+      receiver: 'threshold@example.com',
+      recipientType: 'EMAIL',
+      receiverCountryCode: 'US',
+      amount: 35,
+      currency: 'USD',
+      note: 'Preview policy payout'
+    });
+
+    const previewResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/payouts/preview',
+      headers: jsonHeaders(previewPayload, bearerHeaders(userTokens.demoUser)),
+      body: previewPayload
+    });
+
+    assert.equal(previewResponse.status, 200);
+    const previewBody = previewResponse.json();
+    assert.equal(previewBody.requested_amount, '35.00');
+    assert.equal(previewBody.fee_amount, '1.85');
+    assert.equal(previewBody.total_debit, '36.85');
+    assert.equal(previewBody.balance.available_cents, 250000);
+    assert.equal(previewBody.balance.remaining_available_cents, 246315);
+    assert.equal(previewBody.balance.sufficient, true);
+    assert.equal(previewBody.next_action, 'MANUAL_REVIEW');
 
     const belowMinimumPayload = JSON.stringify({
       userId: 'demo-user',
@@ -2098,6 +3183,83 @@ describe('API integration flows', () => {
     assert.equal(user.wallet.paidOutBalanceCents, 3685);
   });
 
+  test('Stripe payout preview and approval create a guarded Connect transfer', async () => {
+    await platformConfigRepository.update({
+      payout_fee_fixed_cents: 150,
+      payout_fee_percentage_bps: 100,
+      payout_manual_review_cents: 2000
+    });
+
+    const previewPayload = JSON.stringify({
+      provider: 'stripe',
+      userId: 'demo-user',
+      receiver: 'acct_connected_001',
+      recipientType: 'STRIPE_ACCOUNT',
+      receiverCountryCode: 'US',
+      amount: 35,
+      currency: 'USD',
+      note: 'Stripe payout preview'
+    });
+
+    const previewResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/payouts/preview',
+      headers: jsonHeaders(previewPayload, bearerHeaders(adminToken)),
+      body: previewPayload
+    });
+
+    assert.equal(previewResponse.status, 200);
+    const preview = previewResponse.json();
+    assert.equal(preview.provider, 'stripe');
+    assert.equal(preview.submission_enabled, true);
+    assert.equal(preview.payout_mode, 'transfer_to_connected_account');
+    assert.equal(preview.requested_amount, '35.00');
+    assert.equal(preview.fee_amount, '1.85');
+    assert.equal(preview.total_debit, '36.85');
+    assert.equal(preview.provider_balance.available_for_currency_cents, 125000);
+    assert.equal(preview.provider_balance.sufficient_for_requested_amount, true);
+    assert.equal(preview.next_action, 'MANUAL_REVIEW');
+
+    const requestResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/payouts',
+      headers: jsonHeaders(previewPayload, bearerHeaders(adminToken, {
+        'idempotency-key': 'stripe-payout-transfer-1'
+      })),
+      body: previewPayload
+    });
+
+    assert.equal(requestResponse.status, 201);
+    const requestBody = requestResponse.json();
+    assert.equal(requestBody.status, 'PENDING_APPROVAL');
+    assert.equal(requestBody.risk_decision, 'REVIEW');
+    assert.equal(requestBody.metadata.provider, 'stripe');
+    assert.equal(requestBody.metadata.stripe_destination_account_id, 'acct_connected_001');
+
+    let user = await userRepository.findById('demo-user');
+    assert.equal(user.wallet.availableBalanceCents, 246315);
+    assert.equal(user.wallet.frozenBalanceCents, 3685);
+
+    const approvalResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/admin/payouts/${requestBody.payout_id}/approve`,
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(approvalResponse.status, 200);
+    const approved = approvalResponse.json();
+    assert.equal(approved.status, 'SUCCESS');
+    assert.equal(approved.metadata.provider, 'stripe');
+    assert.equal(approved.metadata.provider_transfer_id, 'tr_transferly_1');
+    assert.equal(approved.metadata.provider_item_status, 'TRANSFERRED');
+    assert.equal(stripeTransferSequence, 1);
+
+    user = await userRepository.findById('demo-user');
+    assert.equal(user.wallet.availableBalanceCents, 246315);
+    assert.equal(user.wallet.frozenBalanceCents, 0);
+    assert.equal(user.wallet.paidOutBalanceCents, 3685);
+  });
+
   test('POST /api/payouts/:id/refresh and GET /api/payouts/:id/timeline expose payout sync activity', async () => {
     const requestPayload = JSON.stringify({
       userId: 'demo-user',
@@ -2142,6 +3304,17 @@ describe('API integration flows', () => {
     assert.equal(refreshedPayout.metadata.provider_item_status, 'SUCCESS');
     assert.ok(refreshedPayout.metadata.last_synced_at);
 
+    const notePayload = JSON.stringify({ note: 'Confirmed recipient identity before release.' });
+    const noteResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/admin/payouts/${requestBody.payout_id}/notes`,
+      headers: jsonHeaders(notePayload, bearerHeaders(adminToken)),
+      body: notePayload
+    });
+
+    assert.equal(noteResponse.status, 201);
+    assert.equal(noteResponse.json().note, 'Confirmed recipient identity before release.');
+
     const timelineResponse = await injectRequest(app, {
       method: 'GET',
       url: `/api/payouts/${requestBody.payout_id}/timeline?limit=10`,
@@ -2156,6 +3329,7 @@ describe('API integration flows', () => {
         entry.action === 'payout.refreshed' || entry.action === 'payout.processed'
       )
     );
+    assert.ok(timelineBody.data.some((entry) => entry.action === 'payout.note_added'));
   });
 
   test('admin can cancel an unclaimed PayPal payout item and restore funds to available balance', async () => {
@@ -2257,6 +3431,16 @@ describe('API integration flows', () => {
     assert.equal(heldPayout.official_paypal.provider_item_status, 'ONHOLD');
     assert.equal(heldPayout.official_paypal.provider_issue_code, 'REGULATORY_PENDING');
     assert.equal(heldPayout.official_paypal.remediation.action, 'review_hold');
+
+    const filteredListResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/payouts?providerState=ONHOLD&recipient=held&pageSize=5&sortBy=amount&sortDirection=asc',
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(filteredListResponse.status, 200);
+    assert.equal(filteredListResponse.json().data.length, 1);
+    assert.equal(filteredListResponse.json().data[0].payout_id, requestBody.payout_id);
   });
 
   test('PayPal payout item webhooks trigger payout resync through official PayPal endpoints', async () => {
@@ -2590,6 +3774,175 @@ describe('API integration flows', () => {
     assert.equal(reconcileBody.summary.invoice_count, 1);
     assert.equal(reconcileBody.summary.payout_count, 0);
     assert.equal(reconcileBody.invoices[0].status, 'PAID');
+  });
+
+  test('Stripe invoice paid webhook verifies signature, settles pending funds, and deduplicates events and refreshes', async () => {
+    const payload = JSON.stringify({
+      userId: 'demo-user',
+      provider: 'stripe',
+      recipientEmail: 'buyer@example.com',
+      currency: 'USD',
+      description: 'Stripe webhook invoice',
+      items: [
+        {
+          name: 'Consulting',
+          description: 'Webhook invoice',
+          quantity: 1,
+          unitAmount: 125
+        }
+      ]
+    });
+
+    const createResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/invoices',
+      headers: jsonHeaders(payload, bearerHeaders(userTokens.demoUser)),
+      body: payload
+    });
+
+    assert.equal(createResponse.status, 201);
+    const createdInvoice = createResponse.json();
+
+    const webhookPayload = JSON.stringify({
+      id: 'evt_stripe_invoice_paid_1',
+      type: 'invoice.paid',
+      data: {
+        object: {
+          id: createdInvoice.invoice_id,
+          object: 'invoice',
+          status: 'paid',
+          hosted_invoice_url: createdInvoice.invoice_link,
+          invoice_pdf: 'https://invoice.stripe.test/in_transferly_1.pdf',
+          status_transitions: {
+            paid_at: 1773350400
+          }
+        }
+      }
+    });
+    const headers = {
+      'content-type': 'application/json',
+      'stripe-signature': createStripeSignature(webhookPayload)
+    };
+
+    const webhookResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/stripe',
+      headers: jsonHeaders(webhookPayload, headers),
+      body: webhookPayload
+    });
+
+    assert.equal(webhookResponse.status, 202);
+    assert.equal(webhookResponse.json().duplicate, false);
+
+    let user = await userRepository.findById('demo-user');
+    assert.equal(user.wallet.pendingBalanceCents, 12500);
+
+    const duplicateResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/stripe',
+      headers: jsonHeaders(webhookPayload, headers),
+      body: webhookPayload
+    });
+
+    assert.equal(duplicateResponse.status, 200);
+    assert.equal(duplicateResponse.json().duplicate, true);
+
+    const updatedInvoice = await invoiceRepository.findByPaypalInvoiceId(createdInvoice.invoice_id);
+    assert.equal(updatedInvoice.status, 'PAID');
+    assert.equal(updatedInvoice.metadata.provider, 'stripe');
+
+    const webhookEvent = await webhookEventRepository.findByEventId('stripe:evt_stripe_invoice_paid_1');
+    assert.ok(webhookEvent);
+    assert.equal(webhookEvent.status, 'PROCESSED');
+
+    user = await userRepository.findById('demo-user');
+    assert.equal(user.wallet.pendingBalanceCents, 12500);
+
+    const refreshResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/invoices/${createdInvoice.internal_invoice_id}/refresh`,
+      headers: jsonHeaders('{}', bearerHeaders(userTokens.demoUser)),
+      body: '{}'
+    });
+
+    assert.equal(refreshResponse.status, 200);
+    user = await userRepository.findById('demo-user');
+    assert.equal(user.wallet.pendingBalanceCents, 12500);
+  });
+
+  test('Crypto charge confirmed webhook verifies signature, deduplicates refreshes, and keeps settlement review required', async () => {
+    const payload = JSON.stringify({
+      userId: 'demo-user',
+      provider: 'crypto',
+      recipientEmail: 'buyer@example.com',
+      currency: 'USD',
+      description: 'Crypto webhook invoice',
+      items: [
+        {
+          name: 'Crypto consulting',
+          description: 'Webhook charge',
+          quantity: 1,
+          unitAmount: 125
+        }
+      ]
+    });
+
+    const createResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/invoices',
+      headers: jsonHeaders(payload, bearerHeaders(userTokens.demoUser)),
+      body: payload
+    });
+
+    assert.equal(createResponse.status, 201);
+    const createdInvoice = createResponse.json();
+
+    const webhookPayload = JSON.stringify({
+      id: 'evt_crypto_charge_confirmed_1',
+      type: 'charge:confirmed',
+      data: {
+        id: createdInvoice.invoice_id,
+        code: 'CHARGE1',
+        resource: 'charge',
+        hosted_url: createdInvoice.invoice_link,
+        timeline: [{ status: 'NEW' }, { status: 'CONFIRMED' }]
+      }
+    });
+    const headers = {
+      'content-type': 'application/json',
+      'x-hook0-id': 'hook-crypto-1'
+    };
+    headers['x-hook0-signature'] = createCoinbaseSignature(webhookPayload, headers);
+
+    const webhookResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/crypto',
+      headers: jsonHeaders(webhookPayload, headers),
+      body: webhookPayload
+    });
+
+    assert.equal(webhookResponse.status, 202);
+    assert.equal(webhookResponse.json().duplicate, false);
+
+    const updatedInvoice = await invoiceRepository.findByPaypalInvoiceId(createdInvoice.invoice_id);
+    assert.equal(updatedInvoice.status, 'PAID');
+    assert.equal(updatedInvoice.metadata.provider, 'crypto');
+    assert.equal(updatedInvoice.metadata.settlement_review_required, true);
+    assert.ok(updatedInvoice.metadata.settlement_safeguards.includes('network_mismatch_review'));
+
+    let user = await userRepository.findById('demo-user');
+    assert.equal(user.wallet.pendingBalanceCents, 12500);
+
+    const refreshResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/invoices/${createdInvoice.internal_invoice_id}/refresh`,
+      headers: jsonHeaders('{}', bearerHeaders(userTokens.demoUser)),
+      body: '{}'
+    });
+
+    assert.equal(refreshResponse.status, 200);
+    user = await userRepository.findById('demo-user');
+    assert.equal(user.wallet.pendingBalanceCents, 12500);
   });
 
   test('PayPal invoice paid webhook is idempotent for duplicate event ids', async () => {

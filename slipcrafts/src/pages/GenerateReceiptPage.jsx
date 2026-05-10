@@ -30,6 +30,58 @@ const emailServicePresets = {
       body: 'Hello,\n\nA new deposit has been recorded on your PayPal account. Review the transaction summary below.\n\nRegards,\nPayPal'
     }
   },
+  stripe: {
+    provider: 'Stripe',
+    fromName: 'Stripe',
+    fromEmail: 'receipts@stripe.com',
+    custom: {
+      subject: 'Payment activity notice',
+      body: 'Hello,\n\nA Stripe payment activity notice is ready for review. Check the payment details below.\n\nStripe'
+    },
+    deposit: {
+      subject: 'Payment received',
+      body: 'Hello,\n\nYour Stripe payment has been received successfully. Review the confirmation details below.\n\nStripe'
+    }
+  },
+  paystack: {
+    provider: 'Paystack',
+    fromName: 'Paystack',
+    fromEmail: 'receipts@paystack.com',
+    custom: {
+      subject: 'Payment request update',
+      body: 'Hello,\n\nA Paystack payment request update is available. Review the payment details below.\n\nPaystack'
+    },
+    deposit: {
+      subject: 'Payment received',
+      body: 'Hello,\n\nA Paystack payment has been received successfully. Review the confirmation details below.\n\nPaystack'
+    }
+  },
+  flutterwave: {
+    provider: 'Flutterwave',
+    fromName: 'Flutterwave',
+    fromEmail: 'hi@flutterwavego.com',
+    custom: {
+      subject: 'Payment notification',
+      body: 'Hello,\n\nA Flutterwave payment notification is ready for review. Check the transaction details below.\n\nFlutterwave'
+    },
+    deposit: {
+      subject: 'Payment completed',
+      body: 'Hello,\n\nYour Flutterwave payment has completed successfully. Review the confirmation details below.\n\nFlutterwave'
+    }
+  },
+  crypto: {
+    provider: 'Crypto Commerce',
+    fromName: 'Crypto Commerce',
+    fromEmail: 'receipts@commerce.example',
+    custom: {
+      subject: 'Crypto payment notice',
+      body: 'Hello,\n\nA crypto payment notice is ready for review. Check the charge and settlement details below.\n\nCrypto Commerce'
+    },
+    deposit: {
+      subject: 'Crypto payment confirmed',
+      body: 'Hello,\n\nA crypto payment has been confirmed. Review the settlement details below.\n\nCrypto Commerce'
+    }
+  },
   binance: {
     provider: 'Binance',
     fromName: 'Binance',

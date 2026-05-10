@@ -13,14 +13,14 @@ const {
   createWorkerFailureHandler
 } = require('./workerHelpers');
 const { logger } = require('../utils/logger');
-const { paypalInvoiceService } = require('../services/paypalInvoiceService');
+const { providerInvoiceService } = require('../services/providerInvoiceService');
 const { paymentReconciliationService } = require('../services/paymentReconciliationService');
-const { paypalPayoutService } = require('../services/paypalPayoutService');
+const { payoutProcessingService } = require('../services/payoutProcessingService');
 const { webhookService } = require('../services/webhookService');
 
 const invoiceWorker = new Worker(
   queueNames.invoiceSend,
-  async (job) => paypalInvoiceService.createAndSendInvoice(job.data),
+  async (job) => providerInvoiceService.createAndSendInvoice(job.data),
   {
     connection: redisConnection,
     concurrency: 2
@@ -30,7 +30,7 @@ const invoiceWorker = new Worker(
 const payoutWorker = new Worker(
   queueNames.payoutProcess,
   createPayoutJobProcessor({
-    payoutService: paypalPayoutService,
+    payoutService: payoutProcessingService,
     retryQueue: payoutRetryQueue,
     retryDelayMs: RETRY_DELAYS_MS.initialPayoutPoll
   }),
@@ -43,7 +43,7 @@ const payoutWorker = new Worker(
 const payoutRetryWorker = new Worker(
   queueNames.payoutRetry,
   createPayoutJobProcessor({
-    payoutService: paypalPayoutService,
+    payoutService: payoutProcessingService,
     retryQueue: payoutRetryQueue,
     retryDelayMs: RETRY_DELAYS_MS.followUpPayoutPoll
   }),

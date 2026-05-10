@@ -140,6 +140,62 @@ export const serviceCatalog = [
     mark: 'PP'
   },
   {
+    slug: 'stripe',
+    title: 'Stripe Connect',
+    category: 'Payment Providers',
+    badge: 'Adapter',
+    status: 'available',
+    description: 'Stripe Connect provider launcher for invoices, payment links, connected-account payouts, and balance readiness.',
+    detail:
+      'Stripe is registered as a payment provider adapter. The launcher groups Custom Details, Invoices, Payouts, Wallet Balance, and setup state in one service page.',
+    launchTo: '/services/stripe',
+    launchLabel: 'Open Stripe Launcher',
+    accent: { bg: '#635bff', fg: '#ffffff', edge: '#4f46e5', glow: 'rgba(99,91,255,0.24)' },
+    mark: 'ST'
+  },
+  {
+    slug: 'paystack',
+    title: 'Paystack',
+    category: 'Payment Providers',
+    badge: 'Adapter',
+    status: 'available',
+    description: 'Paystack provider launcher for Payment Requests, transfers, wallet balance, and webhook readiness.',
+    detail:
+      'Paystack is registered as a payment provider adapter. The launcher groups invoice-like Payment Requests, transfers, Custom Details, and provider setup lanes.',
+    launchTo: '/services/paystack',
+    launchLabel: 'Open Paystack Launcher',
+    accent: { bg: '#011b33', fg: '#ffffff', edge: '#0f3b61', glow: 'rgba(1,27,51,0.26)' },
+    mark: 'PS'
+  },
+  {
+    slug: 'flutterwave',
+    title: 'Flutterwave',
+    category: 'Payment Providers',
+    badge: 'Adapter',
+    status: 'available',
+    description: 'Flutterwave provider launcher for hosted checkout links, transfers, transfer-rate previews, and wallet readiness.',
+    detail:
+      'Flutterwave is registered as a payment provider adapter. The launcher groups hosted checkout, payout transfers, Custom Details, balance readiness, and setup state.',
+    launchTo: '/services/flutterwave',
+    launchLabel: 'Open Flutterwave Launcher',
+    accent: { bg: '#f5a623', fg: '#1f2937', edge: '#b87503', glow: 'rgba(245,166,35,0.24)' },
+    mark: 'FL'
+  },
+  {
+    slug: 'crypto',
+    title: 'Crypto Commerce',
+    category: 'Payment Providers',
+    badge: 'Adapter',
+    status: 'available',
+    description: 'Crypto Commerce provider launcher for hosted crypto checkout, settlement review, and receipt-style custom details.',
+    detail:
+      'Crypto Commerce is registered as a hosted charge and checkout adapter. The launcher keeps crypto invoices, settlement safeguards, wallet review, and Custom Details grouped together.',
+    launchTo: '/services/crypto',
+    launchLabel: 'Open Crypto Launcher',
+    accent: { bg: '#111827', fg: '#fef3c7', edge: '#374151', glow: 'rgba(17,24,39,0.28)' },
+    mark: 'CR'
+  },
+  {
     slug: 'crypto-com',
     title: 'Crypto.com',
     category: 'Flash Emails',
@@ -347,6 +403,11 @@ export const serviceGroups = [
     title: 'Bank Slips',
     description: 'Bank-slip style services with direct, brand-specific launch points.',
     slugs: ['opay', 'kuda', 'palmpay']
+  },
+  {
+    title: 'Payment Providers',
+    description: 'Provider launchers group Custom Details, Invoices, Payouts, Wallet Balance, and setup state by provider.',
+    slugs: ['paypal', 'stripe', 'wise', 'paystack', 'flutterwave', 'crypto']
   },
   {
     title: 'Flash Emails',

@@ -14,13 +14,41 @@ const {
 const { AppError } = require('../utils/errors');
 const { buildReceiptArtifacts } = require('../utils/simplePdf');
 
+const LABEL_TOKEN_OVERRIDES = new Map([
+  ['api', 'API'],
+  ['crypto', 'Crypto'],
+  ['email', 'Email'],
+  ['gcash', 'GCash'],
+  ['id', 'ID'],
+  ['kuda', 'Kuda'],
+  ['opay', 'Opay'],
+  ['paypal', 'PayPal'],
+  ['qr', 'QR'],
+  ['url', 'URL'],
+  ['usd', 'USD'],
+  ['usdt', 'USDT']
+]);
+
+function formatGeneratedFieldLabel(label) {
+  return String(label)
+    .trim()
+    .replace(/[_-]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => {
+      const normalized = token.toLowerCase();
+      return LABEL_TOKEN_OVERRIDES.get(normalized) || `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`;
+    })
+    .join(' ');
+}
+
 function buildFields(details, fields) {
   if (Array.isArray(fields) && fields.length > 0) {
     return fields;
   }
 
   return Object.entries(details || {}).map(([label, value]) => ({
-    label,
+    label: formatGeneratedFieldLabel(label),
     value: String(value)
   }));
 }
@@ -51,7 +79,7 @@ async function generateReceipt(input) {
     const title = input.title || `${platformConfig.platform_name} ${String(input.type).toUpperCase()} Receipt`;
     const fields = buildFields(input.details, input.fields);
     const summaryText = buildSummaryText(user, input);
-    const artifacts = buildReceiptArtifacts(title, summaryText, fields);
+    const artifacts = buildReceiptArtifacts(title, summaryText, fields, input.details || {});
 
     const receipt = await receiptRepository.create(
       {
@@ -64,7 +92,8 @@ async function generateReceipt(input) {
         },
         data: {
           fields,
-          details: input.details || {}
+          details: input.details || {},
+          layout: artifacts.layout
         },
         pdfBase64: artifacts.pdfBase64,
         imageDataUrl: artifacts.imageDataUrl,

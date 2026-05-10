@@ -10,7 +10,7 @@ const { ledgerService } = require('./ledgerService');
 const { paymentOpsIssueService } = require('./paymentOpsIssueService');
 const { riskService } = require('./riskService');
 const { AppError } = require('../utils/errors');
-const { ensurePositiveMoney, parseAmount, sumInvoiceItems } = require('../utils/money');
+const { ensurePositiveMoney, formatMoney, parseAmount, sumInvoiceItems } = require('../utils/money');
 const { INVOICE_STATUS, AUDIT_ACTOR_TYPE } = require('../utils/constants');
 
 const paypalClient = new PayPalClient(
@@ -224,6 +224,50 @@ async function createAndSendInvoice(input) {
   });
 
   return presentInvoice(invoice);
+}
+
+async function previewInvoice(input) {
+  const { resolvedInput, template } = await invoiceTemplateService.resolveInvoiceInput(input);
+  const user = await userRepository.findById(input.userId);
+  if (!user) {
+    throw new AppError(404, 'USER_NOT_FOUND', `User ${input.userId} not found.`);
+  }
+
+  const invoiceRisk = await riskService.evaluateInvoice({
+    description: resolvedInput.description,
+    items: resolvedInput.items.map((item) => ({
+      name: item.name,
+      description: item.description
+    }))
+  });
+  const amountCents = ensurePositiveMoney(sumInvoiceItems(resolvedInput.items));
+  const currency = resolvedInput.currency.toUpperCase();
+
+  return {
+    recipient_email: resolvedInput.recipientEmail.toLowerCase(),
+    template: template
+      ? {
+          id: template.id,
+          name: template.name
+        }
+      : null,
+    currency,
+    subtotal: formatMoney(amountCents),
+    total: formatMoney(amountCents),
+    amount_cents: amountCents,
+    issue_date: normalizeInvoiceDate(resolvedInput.issueDate) || new Date().toISOString().slice(0, 10),
+    due_date: resolvedInput.dueDate || null,
+    line_items: resolvedInput.items.map((item) => ({
+      name: item.name,
+      description: item.description || null,
+      quantity: Number(item.quantity),
+      unit_amount: formatMoney(Math.round(Number(item.unitAmount) * 100)),
+      subtotal: formatMoney(Math.round(Number(item.quantity) * Number(item.unitAmount) * 100))
+    })),
+    risk_decision: invoiceRisk.decision,
+    risk_flags: invoiceRisk.flags,
+    hosted_link_will_be_created: true
+  };
 }
 
 async function refreshInvoice(input) {
@@ -590,6 +634,7 @@ async function releaseInvoiceFunds(input) {
 module.exports = {
   paypalInvoiceService: {
     createAndSendInvoice,
+    previewInvoice,
     refreshInvoice,
     sendInvoiceReminder,
     cancelInvoiceAutoReminders,

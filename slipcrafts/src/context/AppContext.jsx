@@ -1,7 +1,10 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
   acknowledgePaymentOpsIssue as acknowledgePaymentOpsIssueRequest,
+  addAdminInvoiceNote as addAdminInvoiceNoteRequest,
+  addAdminPayoutNote as addAdminPayoutNoteRequest,
   adjustUserPoints as adjustUserPointsRequest,
+  approveAdminPayout as approveAdminPayoutRequest,
   cancelUnclaimedPayout as cancelUnclaimedPayoutRequest,
   changePassword as changePasswordRequest,
   cancelInvoiceAutoReminders as cancelInvoiceAutoRemindersRequest,
@@ -13,6 +16,7 @@ import {
   createTestimonial as createTestimonialRequest,
   createTopUpOrder as createTopUpOrderRequest,
   clearStoredToken,
+  getStoredAdminToken,
   getStoredToken,
   deleteFaq as deleteFaqRequest,
   deleteAccount as deleteAccountRequest,
@@ -25,9 +29,12 @@ import {
   getInvoiceTimeline as getInvoiceTimelineRequest,
   getMe,
   listInvoiceReminderConfigurations as listInvoiceReminderConfigurationsRequest,
+  listAdminInvoices as listAdminInvoicesRequest,
   listAdminInvoiceTemplates as listAdminInvoiceTemplatesRequest,
+  listAdminPayouts as listAdminPayoutsRequest,
   listAdminTopUpOrders as listAdminTopUpOrdersRequest,
   listPaymentOpsIssues as listPaymentOpsIssuesRequest,
+  markAdminInvoiceReviewRequired as markAdminInvoiceReviewRequiredRequest,
   reopenPaymentOpsIssue as reopenPaymentOpsIssueRequest,
   resolvePaymentOpsIssue as resolvePaymentOpsIssueRequest,
   getPayoutTimeline as getPayoutTimelineRequest,
@@ -36,10 +43,14 @@ import {
   listTopUpOrders as listTopUpOrdersRequest,
   listPayouts as listPayoutsRequest,
   login as loginRequest,
+  previewInvoice as previewInvoiceRequest,
+  previewPayout as previewPayoutRequest,
   register as registerRequest,
   refreshInvoice as refreshInvoiceRequest,
   refreshPayout as refreshPayoutRequest,
   runPaymentReconciliation as runPaymentReconciliationRequest,
+  rejectAdminPayout as rejectAdminPayoutRequest,
+  releaseAdminInvoiceFunds as releaseAdminInvoiceFundsRequest,
   sendInvoiceReminder as sendInvoiceReminderRequest,
   setStoredToken,
   suspendInvoiceReminderConfiguration as suspendInvoiceReminderConfigurationRequest,
@@ -174,6 +185,7 @@ function mapProfile(profileData, pointsData, referralData, userData) {
     user_id: profileData?.userId || profileData?.user_id || userData?.id || null,
     email: userData?.email || '',
     name: profileData?.name || userData?.displayName || userData?.name || '',
+    wallet: userData?.wallet || null,
     points: Number(pointsData?.points ?? profileData?.points ?? 0),
     referral_code: referralData?.referral_code || profileData?.referralCode || profileData?.referral_code || '',
     referral_count: Number(
@@ -267,6 +279,8 @@ export function AppContextProvider({ children }) {
   const [invoiceTemplates, setInvoiceTemplatesState] = useState([]);
   const [paymentIssues, setPaymentIssuesState] = useState([]);
   const [payouts, setPayoutsState] = useState([]);
+  const [invoicePagination, setInvoicePaginationState] = useState(null);
+  const [payoutPagination, setPayoutPaginationState] = useState(null);
   const [topUpOrders, setTopUpOrdersState] = useState([]);
   const [adminTopUpOrders, setAdminTopUpOrdersState] = useState([]);
 
@@ -293,6 +307,8 @@ export function AppContextProvider({ children }) {
       setInvoiceTemplatesState([]);
       setPaymentIssuesState([]);
       setPayoutsState([]);
+      setInvoicePaginationState(null);
+      setPayoutPaginationState(null);
       setTopUpOrdersState([]);
       setAdminTopUpOrdersState([]);
       return null;
@@ -361,18 +377,22 @@ export function AppContextProvider({ children }) {
     }
   }, []);
 
-  const fetchInvoices = useCallback(async () => {
+  const fetchInvoices = useCallback(async (filters = {}) => {
     try {
-      const payload = await listInvoicesRequest();
+      const payload = profile?.is_admin
+        ? await listAdminInvoicesRequest(filters)
+        : await listInvoicesRequest(filters);
       const nextInvoices = Array.isArray(payload?.data) ? payload.data : [];
       setInvoicesState(nextInvoices);
+      setInvoicePaginationState(payload?.pagination || null);
       return nextInvoices;
     } catch (error) {
       console.error('Failed to fetch invoices', error);
       setInvoicesState([]);
+      setInvoicePaginationState(null);
       return [];
     }
-  }, []);
+  }, [profile?.is_admin]);
 
   const fetchInvoiceTemplates = useCallback(async () => {
     try {
@@ -446,18 +466,22 @@ export function AppContextProvider({ children }) {
     }
   }, []);
 
-  const fetchPayouts = useCallback(async () => {
+  const fetchPayouts = useCallback(async (filters = {}) => {
     try {
-      const payload = await listPayoutsRequest();
+      const payload = profile?.is_admin
+        ? await listAdminPayoutsRequest(filters)
+        : await listPayoutsRequest(filters);
       const nextPayouts = Array.isArray(payload?.data) ? payload.data : [];
       setPayoutsState(nextPayouts);
+      setPayoutPaginationState(payload?.pagination || null);
       return nextPayouts;
     } catch (error) {
       console.error('Failed to fetch payouts', error);
       setPayoutsState([]);
+      setPayoutPaginationState(null);
       return [];
     }
-  }, []);
+  }, [profile?.is_admin]);
 
   const fetchTopUpOrders = useCallback(async () => {
     try {
@@ -499,7 +523,7 @@ export function AppContextProvider({ children }) {
 
         applyBootstrap(bootstrapPayload);
 
-        const token = getStoredToken();
+        const token = getStoredToken() || getStoredAdminToken();
         if (!token) {
           return;
         }
@@ -567,6 +591,8 @@ export function AppContextProvider({ children }) {
     setInvoiceTemplatesState([]);
     setPaymentIssuesState([]);
     setPayoutsState([]);
+    setInvoicePaginationState(null);
+    setPayoutPaginationState(null);
     setTopUpOrdersState([]);
     setAdminTopUpOrdersState([]);
   }, []);
@@ -759,6 +785,8 @@ export function AppContextProvider({ children }) {
       setInvoiceTemplatesState([]);
       setPaymentIssuesState([]);
       setPayoutsState([]);
+      setInvoicePaginationState(null);
+      setPayoutPaginationState(null);
       setTopUpOrdersState([]);
       setAdminTopUpOrdersState([]);
       return { success: true };
@@ -883,6 +911,22 @@ export function AppContextProvider({ children }) {
     }
   }, [user?.id]);
 
+  const previewInvoice = useCallback(async (input) => {
+    if (!user?.id) {
+      return { success: false, message: 'Authentication required' };
+    }
+
+    try {
+      const preview = await previewInvoiceRequest({
+        ...input,
+        userId: input?.userId || user.id
+      });
+      return { success: true, preview };
+    } catch (error) {
+      return { success: false, message: error.message };
+    }
+  }, [user?.id]);
+
   const updateInvoiceTemplate = useCallback(async (templateId, updates) => {
     try {
       const payload = await updateAdminInvoiceTemplateRequest(templateId, updates);
@@ -970,6 +1014,79 @@ export function AppContextProvider({ children }) {
       return { success: false, message: error.message };
     }
   }, [user?.id]);
+
+  const previewPayout = useCallback(async (input) => {
+    if (!user?.id) {
+      return { success: false, message: 'Authentication required' };
+    }
+
+    try {
+      const preview = await previewPayoutRequest({
+        ...input,
+        userId: input?.userId || user.id
+      });
+      return { success: true, preview };
+    } catch (error) {
+      return { success: false, message: error.message };
+    }
+  }, [user?.id]);
+
+  const approvePayout = useCallback(async (payoutId) => {
+    try {
+      const payout = await approveAdminPayoutRequest(payoutId);
+      setPayoutsState((previous) => upsertByKey(previous, payout, 'payout_id'));
+      return { success: true, payout };
+    } catch (error) {
+      return { success: false, message: error.message };
+    }
+  }, []);
+
+  const rejectPayout = useCallback(async (payoutId, reason) => {
+    try {
+      const payout = await rejectAdminPayoutRequest(payoutId, reason);
+      setPayoutsState((previous) => upsertByKey(previous, payout, 'payout_id'));
+      return { success: true, payout };
+    } catch (error) {
+      return { success: false, message: error.message };
+    }
+  }, []);
+
+  const releaseInvoiceFunds = useCallback(async (invoiceId, payload = {}) => {
+    try {
+      const release = await releaseAdminInvoiceFundsRequest(invoiceId, payload);
+      return { success: true, release };
+    } catch (error) {
+      return { success: false, message: error.message };
+    }
+  }, []);
+
+  const markInvoiceReviewRequired = useCallback(async (invoiceId, payload = {}) => {
+    try {
+      const invoice = await markAdminInvoiceReviewRequiredRequest(invoiceId, payload);
+      setInvoicesState((previous) => upsertByKey(previous, invoice, 'internal_invoice_id'));
+      return { success: true, invoice };
+    } catch (error) {
+      return { success: false, message: error.message };
+    }
+  }, []);
+
+  const addInvoiceNote = useCallback(async (invoiceId, note) => {
+    try {
+      const result = await addAdminInvoiceNoteRequest(invoiceId, note);
+      return { success: true, note: result?.note || note };
+    } catch (error) {
+      return { success: false, message: error.message };
+    }
+  }, []);
+
+  const addPayoutNote = useCallback(async (payoutId, note) => {
+    try {
+      const result = await addAdminPayoutNoteRequest(payoutId, note);
+      return { success: true, note: result?.note || note };
+    } catch (error) {
+      return { success: false, message: error.message };
+    }
+  }, []);
 
   const cancelUnclaimedPayout = useCallback(async (payoutId) => {
     try {
@@ -1077,6 +1194,8 @@ export function AppContextProvider({ children }) {
     invoiceTemplates,
     paymentIssues,
     payouts,
+    invoicePagination,
+    payoutPagination,
     topUpOrders,
     adminTopUpOrders,
     fetchInvoices,
@@ -1090,7 +1209,15 @@ export function AppContextProvider({ children }) {
     fetchTopUpOrders,
     fetchAdminTopUpOrders,
     createInvoice,
+    previewInvoice,
     createPayout,
+    previewPayout,
+    approvePayout,
+    rejectPayout,
+    releaseInvoiceFunds,
+    markInvoiceReviewRequired,
+    addInvoiceNote,
+    addPayoutNote,
     createInvoiceTemplate,
     updateInvoiceTemplate,
     deleteInvoiceTemplate,

@@ -10,6 +10,8 @@ coverage
 *.log
 data/*.sqlite
 data/*.sqlite-*
+bot/db/*.db
+bot/db/*.db-*
 API/data/*.sqlite
 API/data/*.sqlite-*
 .playwright-mcp/

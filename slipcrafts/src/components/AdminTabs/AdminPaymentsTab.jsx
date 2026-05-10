@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock3,
+  Eye,
   ExternalLink,
   FileText,
   MessageSquare,
@@ -15,278 +16,61 @@ import {
   ShieldX,
   Send,
   Trash2,
-  Wallet
+  Wallet,
+  X
 } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useAppContext } from '../../context/AppContext';
+import { listStripeConnectedAccounts } from '../../lib/api';
+import PayPalSandboxPayoutChrome from './AdminPaymentsTab.paypalSandbox';
+import {
+  BUILT_IN_INVOICE_SAVED_VIEWS,
+  BUILT_IN_PAYOUT_SAVED_VIEWS,
+  PAYPAL_BRAND,
+  buildReminderDrafts,
+  calculateLineItemSubtotalCents,
+  calculateLineItemsTotalCents,
+  createEmptyInvoiceComposer,
+  createEmptyLineItem,
+  createEmptyPayoutComposer,
+  createEmptyTemplateForm,
+  formatCents,
+  formatDateTime,
+  getInitialPageParam,
+  getInitialSearchParam,
+  getPayoutPricingPreview,
+  getTopUpOrderTone,
+  getWalletAvailableCents,
+  getWalletBucketCents,
+  parseMoneyToCents,
+  readSavedViewsForType,
+  setSearchParamIfChanged,
+  writeSavedViewsForType
+} from './AdminPaymentsTab.utils';
+import {
+  DetailRow,
+  InvoiceActions,
+  PaginationControls,
+  PaymentRecordDrawer,
+  PayoutComposerSection,
+  PayoutActions,
+  StatusPill,
+  TimelinePanel
+} from './AdminPaymentsTab.components';
 
-const PAYPAL_BRAND = {
-  logoUrl: 'https://www.paypalobjects.com/webstatic/mktg/Logo/pp-logo-200px.png',
-  blue: '#003087',
-  cyan: '#009cde',
-  ink: '#001435',
-  mist: '#f4f8ff',
-  border: '#d5e3ff'
-};
-
-function createEmptyLineItem() {
-  return {
-    name: '',
-    description: '',
-    quantity: 1,
-    unitAmount: ''
-  };
-}
-
-function createEmptyTemplateForm() {
-  return {
-    name: '',
-    description: '',
-    currency_code: 'USD',
-    default_due_days: '',
-    is_active: true,
-    line_items: [createEmptyLineItem()]
-  };
-}
-
-function createEmptyInvoiceComposer() {
-  return {
-    recipientEmail: '',
-    templateId: '',
-    description: '',
-    currency: 'USD',
-    issueDate: '',
-    dueDate: '',
-    items: [createEmptyLineItem()]
-  };
-}
-
-function createEmptyPayoutComposer() {
-  return {
-    receiver: '',
-    recipientType: 'EMAIL',
-    receiverCountryCode: 'US',
-    amount: '',
-    currency: 'USD',
-    note: ''
-  };
-}
-
-function buildReminderDrafts(configurations) {
-  return Object.fromEntries(
-    configurations.map((configuration) => [
-      configuration.id,
-      {
-        type: configuration.type || 'BEFORE_DUE',
-        unit: configuration.interval?.unit || 'DAY',
-        value: String(configuration.interval?.value || 1),
-        repetition: String(configuration.repetition || 1),
-        send_to_invoicer: Boolean(configuration.notification?.send_to_invoicer)
-      }
-    ])
-  );
-}
-
-function formatDateTime(value) {
-  if (!value) {
-    return 'Not synced';
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return date.toLocaleString();
-}
-
-function StatusPill({ value, tone = 'gray' }) {
-  const styles = {
-    gray: 'bg-gray-100 text-gray-700',
-    blue: 'bg-blue-100 text-blue-700',
-    green: 'bg-emerald-100 text-emerald-700',
-    amber: 'bg-amber-100 text-amber-700',
-    red: 'bg-red-100 text-red-700'
-  };
-
-  return (
-    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${styles[tone] || styles.gray}`}>
-      {value}
-    </span>
-  );
-}
-
-function getTopUpOrderTone(status) {
-  if (status === 'completed') {
-    return 'green';
-  }
-  if (status === 'cancelled') {
-    return 'red';
-  }
-  if (status === 'awaiting_confirmation') {
-    return 'amber';
-  }
-  return 'blue';
-}
-
-function TimelinePanel({ title, loading, entries }) {
-  return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-      <h4 className="text-sm font-bold text-gray-900">{title}</h4>
-      {loading ? (
-        <div className="py-4 text-sm text-gray-500">Loading timeline…</div>
-      ) : entries.length === 0 ? (
-        <div className="py-4 text-sm text-gray-500">No timeline events yet.</div>
-      ) : (
-        <div className="mt-3 space-y-3">
-          {entries.map((entry) => (
-            <div key={entry.audit_log_id} className="rounded-lg border border-gray-200 bg-white p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-gray-900">{entry.action}</p>
-                <p className="text-xs text-gray-500">{formatDateTime(entry.created_at)}</p>
-              </div>
-              <div className="mt-1 text-xs text-gray-500">
-                Actor: {entry.actor_type}{entry.actor_id ? ` · ${entry.actor_id}` : ''}
-              </div>
-              {entry.metadata && Object.keys(entry.metadata).length > 0 && (
-                <pre className="mt-3 overflow-x-auto rounded-lg bg-gray-950 p-3 text-xs text-gray-100">
-                  {JSON.stringify(entry.metadata, null, 2)}
-                </pre>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function InvoiceActions({
-  invoice,
-  busyAction,
-  onRefresh,
-  onReminder,
-  onCancelReminders,
-  onQr,
-  onCancel,
-  onTimelineToggle,
-  timelineOpen
-}) {
-  const isBusy = (action) => busyAction === `${action}:${invoice.internal_invoice_id}`;
-  const canCancel = !['PAID', 'CANCELLED', 'REFUNDED'].includes(invoice.status);
-  const canSendReminder = ['SENT', 'UPDATED'].includes(invoice.status);
-  const canGenerateQr = ['SENT', 'UPDATED', 'PAID'].includes(invoice.status);
-  const remindersStopped = Boolean(invoice.summary.auto_reminders_cancelled_at);
-
-  return (
-    <div className="flex flex-wrap gap-2">
-      <button
-        onClick={() => onRefresh(invoice)}
-        disabled={Boolean(busyAction)}
-        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-      >
-        <RefreshCw size={14} className={isBusy('refresh') ? 'animate-spin' : ''} />
-        Refresh
-      </button>
-      <button
-        onClick={() => onReminder(invoice)}
-        disabled={!canSendReminder || Boolean(busyAction)}
-        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-      >
-        <Send size={14} />
-        Remind
-      </button>
-      <button
-        onClick={() => onCancelReminders(invoice)}
-        disabled={remindersStopped || Boolean(busyAction)}
-        className="inline-flex items-center gap-1 rounded-lg border border-amber-200 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-50"
-      >
-        <ShieldX size={14} />
-        Stop Reminders
-      </button>
-      <button
-        onClick={() => onQr(invoice)}
-        disabled={!canGenerateQr || Boolean(busyAction)}
-        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-      >
-        <QrCode size={14} />
-        QR
-      </button>
-      <button
-        onClick={() => onCancel(invoice)}
-        disabled={!canCancel || Boolean(busyAction)}
-        className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-      >
-        <ShieldX size={14} />
-        Cancel
-      </button>
-      <button
-        onClick={() => onTimelineToggle(invoice)}
-        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
-      >
-        <Clock3 size={14} />
-        {timelineOpen ? 'Hide Timeline' : 'Timeline'}
-      </button>
-      {invoice.invoice_link && (
-        <a
-          href={invoice.invoice_link}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-1 rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white hover:bg-gray-800"
-        >
-          <ExternalLink size={14} />
-          Open PayPal
-        </a>
-      )}
-    </div>
-  );
-}
-
-function PayoutActions({ payout, busyAction, onRefresh, onCancelUnclaimed, onTimelineToggle, timelineOpen }) {
-  const isBusy = busyAction === `refresh:${payout.payout_id}`;
-  const remediation = payout.official_paypal?.remediation;
-
-  return (
-    <div className="flex flex-wrap gap-2">
-      <button
-        onClick={() => onRefresh(payout)}
-        disabled={Boolean(busyAction)}
-        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-      >
-        <RefreshCw size={14} className={isBusy ? 'animate-spin' : ''} />
-        Refresh
-      </button>
-      {remediation?.action === 'cancel_unclaimed' && remediation.allowed && (
-        <button
-          onClick={() => onCancelUnclaimed(payout)}
-          disabled={Boolean(busyAction)}
-          className="inline-flex items-center gap-1 rounded-lg border border-amber-200 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-50"
-        >
-          <ShieldX size={14} />
-          {remediation.label}
-        </button>
-      )}
-      <button
-        onClick={() => onTimelineToggle(payout)}
-        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
-      >
-        <Clock3 size={14} />
-        {timelineOpen ? 'Hide Timeline' : 'Timeline'}
-      </button>
-    </div>
-  );
-}
-
-export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
+export default function AdminPaymentsTab({ mode = 'all', embedded = false, providerFilter = '' }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const activeSection = searchParams.get('section') || '';
   const {
     config,
+    profile,
     invoices,
     invoiceTemplates,
     invoiceReminderConfigurations,
     paymentIssues,
     payouts,
+    invoicePagination,
+    payoutPagination,
     adminTopUpOrders,
     acknowledgePaymentIssue,
     fetchInvoices,
@@ -296,7 +80,15 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
     fetchPayouts,
     fetchAdminTopUpOrders,
     createInvoice,
+    previewInvoice,
     createPayout,
+    previewPayout,
+    approvePayout,
+    rejectPayout,
+    releaseInvoiceFunds,
+    markInvoiceReviewRequired,
+    addInvoiceNote,
+    addPayoutNote,
     createInvoiceTemplate,
     updateInvoiceTemplate,
     deleteInvoiceTemplate,
@@ -333,14 +125,44 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
   const [templateForm, setTemplateForm] = useState(createEmptyTemplateForm());
   const [invoiceComposer, setInvoiceComposer] = useState(createEmptyInvoiceComposer());
   const [lastCreatedInvoice, setLastCreatedInvoice] = useState(null);
+  const [invoicePreview, setInvoicePreview] = useState(null);
   const [payoutComposer, setPayoutComposer] = useState(createEmptyPayoutComposer());
   const [lastCreatedPayout, setLastCreatedPayout] = useState(null);
-  const [invoiceSearch, setInvoiceSearch] = useState('');
-  const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('ALL');
-  const [payoutSearch, setPayoutSearch] = useState('');
-  const [payoutStatusFilter, setPayoutStatusFilter] = useState('ALL');
-  const [payoutProviderFilter, setPayoutProviderFilter] = useState('ALL');
+  const [payoutServerPreview, setPayoutServerPreview] = useState(null);
+  const [stripeConnectedAccountsState, setStripeConnectedAccountsState] = useState({
+    accounts: [],
+    loading: false,
+    error: ''
+  });
+  const [selectedStripeConnectedAccountId, setSelectedStripeConnectedAccountId] = useState('');
+  const [invoiceSearch, setInvoiceSearch] = useState(() => getInitialSearchParam(searchParams, 'invoiceRecipient'));
+  const [invoiceProviderSearch, setInvoiceProviderSearch] = useState(() => getInitialSearchParam(searchParams, 'invoiceProvider'));
+  const [invoiceStatusFilter, setInvoiceStatusFilter] = useState(() => getInitialSearchParam(searchParams, 'invoiceStatus', 'ALL'));
+  const [invoiceTemplateFilter, setInvoiceTemplateFilter] = useState(() => getInitialSearchParam(searchParams, 'invoiceTemplate', 'ALL'));
+  const [invoiceDateFrom, setInvoiceDateFrom] = useState(() => getInitialSearchParam(searchParams, 'invoiceFrom'));
+  const [invoiceDateTo, setInvoiceDateTo] = useState(() => getInitialSearchParam(searchParams, 'invoiceTo'));
+  const [invoicePage, setInvoicePage] = useState(() => getInitialPageParam(searchParams, 'invoicePage'));
+  const [invoicePageSize, setInvoicePageSize] = useState(() => getInitialSearchParam(searchParams, 'invoicePageSize', '50'));
+  const [invoiceSortBy, setInvoiceSortBy] = useState(() => getInitialSearchParam(searchParams, 'invoiceSortBy', 'createdAt'));
+  const [invoiceSortDirection, setInvoiceSortDirection] = useState(() => getInitialSearchParam(searchParams, 'invoiceSortDirection', 'desc'));
+  const [payoutSearch, setPayoutSearch] = useState(() => getInitialSearchParam(searchParams, 'payoutRecipient'));
+  const [payoutStatusFilter, setPayoutStatusFilter] = useState(() => getInitialSearchParam(searchParams, 'payoutStatus', 'ALL'));
+  const [payoutProviderFilter, setPayoutProviderFilter] = useState(() => getInitialSearchParam(searchParams, 'payoutProvider', 'ALL'));
+  const [payoutDateFrom, setPayoutDateFrom] = useState(() => getInitialSearchParam(searchParams, 'payoutFrom'));
+  const [payoutDateTo, setPayoutDateTo] = useState(() => getInitialSearchParam(searchParams, 'payoutTo'));
+  const [payoutPage, setPayoutPage] = useState(() => getInitialPageParam(searchParams, 'payoutPage'));
+  const [payoutPageSize, setPayoutPageSize] = useState(() => getInitialSearchParam(searchParams, 'payoutPageSize', '50'));
+  const [payoutSortBy, setPayoutSortBy] = useState(() => getInitialSearchParam(searchParams, 'payoutSortBy', 'createdAt'));
+  const [payoutSortDirection, setPayoutSortDirection] = useState(() => getInitialSearchParam(searchParams, 'payoutSortDirection', 'desc'));
+  const [customInvoiceSavedViews, setCustomInvoiceSavedViews] = useState(() => readSavedViewsForType('invoice'));
+  const [customPayoutSavedViews, setCustomPayoutSavedViews] = useState(() => readSavedViewsForType('payout'));
+  const [invoiceSavedViewName, setInvoiceSavedViewName] = useState('');
+  const [payoutSavedViewName, setPayoutSavedViewName] = useState('');
+  const [detailDrawer, setDetailDrawer] = useState({ type: '', id: '' });
+  const [payoutSandboxView, setPayoutSandboxView] = useState('home');
   const sectionRefs = useRef({});
+  const invoiceFilterResetReadyRef = useRef(false);
+  const payoutFilterResetReadyRef = useRef(false);
   const showFundingOrders = mode === 'all' || mode === 'payout';
   const showReminderCadence = mode === 'all' || mode === 'invoice';
   const showInvoiceTemplates = mode === 'all' || mode === 'invoice';
@@ -349,7 +171,94 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
   const showPaymentIssues = true;
   const isPayPalInvoiceWorkspace = embedded && mode === 'invoice';
   const isPayPalPayoutWorkspace = embedded && mode === 'payout';
+  const isStripePayoutWorkspace = embedded && mode === 'payout' && providerFilter === 'stripe';
   const isPayPalEmbeddedWorkspace = isPayPalInvoiceWorkspace || isPayPalPayoutWorkspace;
+
+  useEffect(() => {
+    if (!isStripePayoutWorkspace) {
+      setStripeConnectedAccountsState({ accounts: [], loading: false, error: '' });
+      setSelectedStripeConnectedAccountId('');
+      return undefined;
+    }
+
+    let cancelled = false;
+    setStripeConnectedAccountsState((previous) => ({ ...previous, loading: true, error: '' }));
+
+    listStripeConnectedAccounts()
+      .then((payload) => {
+        if (cancelled) return;
+        setStripeConnectedAccountsState({
+          accounts: Array.isArray(payload?.data) ? payload.data : [],
+          loading: false,
+          error: ''
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setStripeConnectedAccountsState({
+          accounts: [],
+          loading: false,
+          error: error?.message || 'Stripe connected accounts could not be loaded.'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isStripePayoutWorkspace]);
+
+  useEffect(() => {
+    const nextParams = new URLSearchParams(searchParams);
+    if (!embedded) {
+      nextParams.set('tab', 'payments');
+    }
+    setSearchParamIfChanged(nextParams, 'invoiceRecipient', invoiceSearch);
+    setSearchParamIfChanged(nextParams, 'invoiceProvider', invoiceProviderSearch);
+    setSearchParamIfChanged(nextParams, 'invoiceStatus', invoiceStatusFilter, 'ALL');
+    setSearchParamIfChanged(nextParams, 'invoiceTemplate', invoiceTemplateFilter, 'ALL');
+    setSearchParamIfChanged(nextParams, 'invoiceFrom', invoiceDateFrom);
+    setSearchParamIfChanged(nextParams, 'invoiceTo', invoiceDateTo);
+    setSearchParamIfChanged(nextParams, 'invoicePage', invoicePage, '1');
+    setSearchParamIfChanged(nextParams, 'invoicePageSize', invoicePageSize, '50');
+    setSearchParamIfChanged(nextParams, 'invoiceSortBy', invoiceSortBy, 'createdAt');
+    setSearchParamIfChanged(nextParams, 'invoiceSortDirection', invoiceSortDirection, 'desc');
+    setSearchParamIfChanged(nextParams, 'payoutRecipient', payoutSearch);
+    setSearchParamIfChanged(nextParams, 'payoutStatus', payoutStatusFilter, 'ALL');
+    setSearchParamIfChanged(nextParams, 'payoutProvider', payoutProviderFilter, 'ALL');
+    setSearchParamIfChanged(nextParams, 'payoutFrom', payoutDateFrom);
+    setSearchParamIfChanged(nextParams, 'payoutTo', payoutDateTo);
+    setSearchParamIfChanged(nextParams, 'payoutPage', payoutPage, '1');
+    setSearchParamIfChanged(nextParams, 'payoutPageSize', payoutPageSize, '50');
+    setSearchParamIfChanged(nextParams, 'payoutSortBy', payoutSortBy, 'createdAt');
+    setSearchParamIfChanged(nextParams, 'payoutSortDirection', payoutSortDirection, 'desc');
+
+    if (nextParams.toString() !== searchParams.toString()) {
+      setSearchParams(nextParams, { replace: true });
+    }
+  }, [
+    embedded,
+    invoiceDateFrom,
+    invoiceDateTo,
+    invoicePage,
+    invoicePageSize,
+    invoiceProviderSearch,
+    invoiceSearch,
+    invoiceSortBy,
+    invoiceSortDirection,
+    invoiceStatusFilter,
+    invoiceTemplateFilter,
+    payoutDateFrom,
+    payoutDateTo,
+    payoutPage,
+    payoutPageSize,
+    payoutProviderFilter,
+    payoutSearch,
+    payoutSortBy,
+    payoutSortDirection,
+    payoutStatusFilter,
+    searchParams,
+    setSearchParams
+  ]);
 
   useEffect(() => {
     let active = true;
@@ -453,21 +362,181 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
   );
 
   const payoutStatusOptions = useMemo(
-    () => ['ALL', ...new Set(payouts.map((entry) => entry.status).filter(Boolean))],
+    () =>
+      Array.from(new Set([
+        'ALL',
+        'PENDING_APPROVAL',
+        'QUEUED',
+        'PROCESSING',
+        'PENDING',
+        'SUCCESS',
+        'FAILED',
+        'DENIED',
+        'REJECTED',
+        ...payouts.map((entry) => entry.status).filter(Boolean)
+      ])),
     [payouts]
   );
 
   const payoutProviderOptions = useMemo(
-    () => [
-      'ALL',
-      ...new Set(
-        payouts
+    () =>
+      Array.from(new Set([
+        'ALL',
+        'PENDING',
+        'PROCESSING',
+        'SUCCESS',
+        'UNCLAIMED',
+        'ONHOLD',
+        'FAILED',
+        'RETURNED',
+        ...payouts
           .map((entry) => entry.official_paypal?.provider_item_status || entry.metadata?.provider_item_status)
           .filter(Boolean)
-      )
-    ],
+      ])),
     [payouts]
   );
+
+  useEffect(() => {
+    if (!invoiceFilterResetReadyRef.current) {
+      invoiceFilterResetReadyRef.current = true;
+      return;
+    }
+
+    setInvoicePage(1);
+  }, [
+    invoiceDateFrom,
+    invoiceDateTo,
+    invoicePageSize,
+    invoiceProviderSearch,
+    invoiceSearch,
+    invoiceSortBy,
+    invoiceSortDirection,
+    invoiceStatusFilter,
+    invoiceTemplateFilter
+  ]);
+
+  const invoiceQuery = useMemo(() => {
+    const dateFrom = invoiceDateFrom ? new Date(`${invoiceDateFrom}T00:00:00.000Z`).toISOString() : undefined;
+    const dateTo = invoiceDateTo ? new Date(`${invoiceDateTo}T23:59:59.999Z`).toISOString() : undefined;
+
+    return {
+      recipient: invoiceSearch.trim() || undefined,
+      provider: providerFilter || undefined,
+      providerInvoiceId: invoiceProviderSearch.trim() || undefined,
+      status: invoiceStatusFilter === 'ALL' ? undefined : invoiceStatusFilter,
+      templateId: invoiceTemplateFilter === 'ALL' ? undefined : invoiceTemplateFilter,
+      dateFrom,
+      dateTo,
+      page: invoicePage,
+      pageSize: Number(invoicePageSize) || 50,
+      sortBy: invoiceSortBy,
+      sortDirection: invoiceSortDirection
+    };
+  }, [
+    invoiceDateFrom,
+    invoiceDateTo,
+    invoicePage,
+    invoicePageSize,
+    providerFilter,
+    invoiceProviderSearch,
+    invoiceSearch,
+    invoiceSortBy,
+    invoiceSortDirection,
+    invoiceStatusFilter,
+    invoiceTemplateFilter
+  ]);
+
+  useEffect(() => {
+    if (!showInvoices) {
+      return undefined;
+    }
+
+    let active = true;
+    const timeoutId = window.setTimeout(async () => {
+      const nextInvoices = await fetchInvoices(invoiceQuery);
+      if (!active) {
+        return;
+      }
+      if (
+        detailDrawer.type === 'invoice' &&
+        !nextInvoices.some((entry) => entry.internal_invoice_id === detailDrawer.id)
+      ) {
+        setDetailDrawer({ type: '', id: '' });
+      }
+    }, 250);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [detailDrawer.id, detailDrawer.type, fetchInvoices, invoiceQuery, showInvoices]);
+
+  useEffect(() => {
+    if (!payoutFilterResetReadyRef.current) {
+      payoutFilterResetReadyRef.current = true;
+      return;
+    }
+
+    setPayoutPage(1);
+  }, [
+    payoutDateFrom,
+    payoutDateTo,
+    payoutPageSize,
+    payoutProviderFilter,
+    payoutSearch,
+    payoutSortBy,
+    payoutSortDirection,
+    payoutStatusFilter
+  ]);
+
+  const payoutQuery = useMemo(() => {
+    const dateFrom = payoutDateFrom ? new Date(`${payoutDateFrom}T00:00:00.000Z`).toISOString() : undefined;
+    const dateTo = payoutDateTo ? new Date(`${payoutDateTo}T23:59:59.999Z`).toISOString() : undefined;
+
+    return {
+      recipient: payoutSearch.trim() || undefined,
+      status: payoutStatusFilter === 'ALL' ? undefined : payoutStatusFilter,
+      providerState: payoutProviderFilter === 'ALL' ? undefined : payoutProviderFilter,
+      dateFrom,
+      dateTo,
+      page: payoutPage,
+      pageSize: Number(payoutPageSize) || 50,
+      sortBy: payoutSortBy,
+      sortDirection: payoutSortDirection
+    };
+  }, [
+    payoutDateFrom,
+    payoutDateTo,
+    payoutPage,
+    payoutPageSize,
+    payoutProviderFilter,
+    payoutSearch,
+    payoutSortBy,
+    payoutSortDirection,
+    payoutStatusFilter
+  ]);
+
+  useEffect(() => {
+    if (!showPayouts) {
+      return undefined;
+    }
+
+    let active = true;
+    const timeoutId = window.setTimeout(async () => {
+      const nextPayouts = await fetchPayouts(payoutQuery);
+      if (!active) {
+        return;
+      }
+      if (detailDrawer.type === 'payout' && !nextPayouts.some((entry) => entry.payout_id === detailDrawer.id)) {
+        setDetailDrawer({ type: '', id: '' });
+      }
+    }, 250);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [detailDrawer.id, detailDrawer.type, fetchPayouts, payoutQuery, showPayouts]);
 
   const filteredInvoices = useMemo(() => {
     const query = invoiceSearch.trim().toLowerCase();
@@ -529,28 +598,81 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
 
   const workspaceTitle =
     mode === 'invoice'
-      ? 'Official PayPal Invoicing Workspace'
+      ? `Official ${providerFilter === 'stripe' ? 'Stripe' : providerFilter === 'crypto' ? 'Crypto' : 'PayPal'} Invoicing Workspace`
       : mode === 'payout'
-        ? 'Official PayPal Payout Workspace'
+        ? `Official ${providerFilter === 'stripe' ? 'Stripe' : 'PayPal'} Payout Workspace`
         : 'PayPal Operations';
 
   const workspaceDescription =
     mode === 'invoice'
-      ? 'Run the full hosted-invoice workflow here without leaving the PayPal service experience.'
+      ? `Run the full hosted-invoice workflow here without leaving the ${providerFilter === 'stripe' ? 'Stripe' : providerFilter === 'crypto' ? 'Crypto' : 'PayPal'} service experience.`
       : mode === 'payout'
-        ? 'Run the full payout tracking and remediation workflow here without leaving the PayPal service experience.'
+        ? `Run the full payout tracking and remediation workflow here without leaving the ${providerFilter === 'stripe' ? 'Stripe' : 'PayPal'} service experience.`
       : 'Work only with official PayPal invoice links, QR payloads, sync actions, and payout tracking.';
   const selectedInvoiceTemplate = invoiceTemplates.find((template) => template.id === invoiceComposer.templateId) || null;
+  const invoiceDraftItems = selectedInvoiceTemplate ? selectedInvoiceTemplate.line_items || [] : invoiceComposer.items;
+  const invoiceDraftCurrency = selectedInvoiceTemplate
+    ? selectedInvoiceTemplate.currency_code
+    : (invoiceComposer.currency || 'USD').trim().toUpperCase();
+  const invoiceDraftTotalCents = calculateLineItemsTotalCents(invoiceDraftItems);
+  const payoutPreview = useMemo(
+    () => getPayoutPricingPreview(payoutComposer, config, profile),
+    [config, payoutComposer, profile]
+  );
+  const payoutImpactPreview = payoutServerPreview
+    ? {
+        ...payoutPreview,
+        feeCents: Number(payoutServerPreview.fee_cents || payoutPreview.feeCents),
+        totalDebitCents: Number(payoutServerPreview.total_debit_cents || payoutPreview.totalDebitCents),
+        availableCents: Number(payoutServerPreview.balance?.available_cents ?? payoutPreview.availableCents),
+        remainingAvailableCents: Number(
+          payoutServerPreview.balance?.remaining_available_cents ?? payoutPreview.remainingAvailableCents
+        ),
+        likelyReviewPath:
+          payoutServerPreview.next_action === 'MANUAL_REVIEW'
+            ? 'Manual review likely'
+            : payoutServerPreview.next_action === 'BLOCK'
+              ? 'Blocked by policy'
+              : payoutServerPreview.next_action === 'READY_AFTER_SETUP'
+                ? 'Ready after setup'
+              : 'Auto-processing likely'
+      }
+    : payoutPreview;
+  const walletCurrency =
+    profile?.wallet?.currencyCode || profile?.wallet?.currency_code || payoutImpactPreview.currency || 'USD';
+  const payoutSandboxWallet = {
+    availableCents: getWalletAvailableCents(profile),
+    pendingCents: getWalletBucketCents(profile, 'pendingBalanceCents', 'pending_balance_cents'),
+    frozenCents: getWalletBucketCents(profile, 'frozenBalanceCents', 'frozen_balance_cents'),
+    paidOutCents: getWalletBucketCents(profile, 'paidOutBalanceCents', 'paid_out_balance_cents')
+  };
+  const payoutSandboxStatus = {
+    processing: payouts.filter((entry) => ['PENDING', 'PROCESSING', 'QUEUED'].includes(entry.status)).length,
+    review: payouts.filter((entry) => entry.status === 'PENDING_APPROVAL').length,
+    issues: payouts.filter((entry) =>
+      ['ONHOLD', 'RETURNED', 'FAILED', 'DENIED'].includes(
+        entry.official_paypal?.provider_item_status || entry.metadata?.provider_item_status || entry.status
+      )
+    ).length
+  };
+  const selectedInvoiceRecord = invoices.find((invoice) => invoice.internal_invoice_id === detailDrawer.id) || null;
+  const selectedPayoutRecord = payouts.find((payout) => payout.payout_id === detailDrawer.id) || null;
   const showInvoiceComposer = mode === 'invoice';
   const showPayoutComposer = mode === 'payout';
-
+  const renderPayPalPayoutChrome = isPayPalPayoutWorkspace;
+  const renderSummaryCards = !renderPayPalPayoutChrome;
+  const renderWorkspaceControls = !renderPayPalPayoutChrome;
+  const renderPayoutComposer = showPayoutComposer && !renderPayPalPayoutChrome;
+  const renderPayoutActivity = showPayouts && !renderPayPalPayoutChrome;
+  const renderFundingOrders = showFundingOrders && !renderPayPalPayoutChrome;
+  const renderPaymentIssues = showPaymentIssues && !renderPayPalPayoutChrome;
   const handleRefreshAll = async () => {
     setBusyAction('reconciliation');
     const result = await runPaymentReconciliation({ invoiceLimit: 50, payoutLimit: 50 });
     if (result.success) {
       await Promise.all([
         fetchInvoices(),
-        fetchPayouts(),
+        fetchPayouts(payoutQuery),
         fetchAdminTopUpOrders(),
         fetchInvoiceReminderConfigurations(),
         fetchPaymentIssues()
@@ -579,6 +701,135 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
     }
     nextParams.set('section', sectionId);
     setSearchParams(nextParams);
+  };
+
+  const handlePayoutSandboxNavigation = (view) => {
+    setPayoutSandboxView(view);
+
+    if (isPayPalPayoutWorkspace) {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('tab');
+      nextParams.delete('section');
+      setSearchParams(nextParams, { replace: true });
+    }
+  };
+
+  const applyPayoutFilters = (next) => {
+    if (!next) {
+      return;
+    }
+
+    setPayoutSearch(next.search || '');
+    setPayoutStatusFilter(next.status || 'ALL');
+    setPayoutProviderFilter(next.provider || 'ALL');
+    setPayoutSortBy(next.sortBy || 'createdAt');
+    setPayoutSortDirection(next.sortDirection || 'desc');
+    setPayoutDateFrom(next.dateFrom || '');
+    setPayoutDateTo(next.dateTo || '');
+    setPayoutPageSize(String(next.pageSize || '50'));
+  };
+
+  const applyPayoutSavedView = (view) => {
+    const savedView = [...BUILT_IN_PAYOUT_SAVED_VIEWS, ...customPayoutSavedViews].find((entry) => entry.id === view);
+    applyPayoutFilters(savedView?.filters);
+  };
+
+  const applyInvoiceFilters = (next) => {
+    if (!next) {
+      return;
+    }
+
+    setInvoiceSearch(next.recipient || '');
+    setInvoiceProviderSearch(next.provider || '');
+    setInvoiceStatusFilter(next.status || 'ALL');
+    setInvoiceTemplateFilter(next.template || 'ALL');
+    setInvoiceSortBy(next.sortBy || 'createdAt');
+    setInvoiceSortDirection(next.sortDirection || 'desc');
+    setInvoiceDateFrom(next.dateFrom || '');
+    setInvoiceDateTo(next.dateTo || '');
+    setInvoicePageSize(String(next.pageSize || '50'));
+  };
+
+  const applyInvoiceSavedView = (view) => {
+    const savedView = [...BUILT_IN_INVOICE_SAVED_VIEWS, ...customInvoiceSavedViews].find((entry) => entry.id === view);
+    applyInvoiceFilters(savedView?.filters);
+  };
+
+  const buildCurrentInvoiceSavedView = () => ({
+    recipient: invoiceSearch,
+    provider: invoiceProviderSearch,
+    status: invoiceStatusFilter,
+    template: invoiceTemplateFilter,
+    dateFrom: invoiceDateFrom,
+    dateTo: invoiceDateTo,
+    pageSize: invoicePageSize,
+    sortBy: invoiceSortBy,
+    sortDirection: invoiceSortDirection
+  });
+
+  const buildCurrentPayoutSavedView = () => ({
+    search: payoutSearch,
+    status: payoutStatusFilter,
+    provider: payoutProviderFilter,
+    dateFrom: payoutDateFrom,
+    dateTo: payoutDateTo,
+    pageSize: payoutPageSize,
+    sortBy: payoutSortBy,
+    sortDirection: payoutSortDirection
+  });
+
+  const handleSaveInvoiceSavedView = () => {
+    const label = invoiceSavedViewName.trim();
+    if (!label) {
+      toast.error('Name the invoice view first');
+      return;
+    }
+
+    const nextViews = [
+      ...customInvoiceSavedViews,
+      {
+        id: `invoice-${Date.now()}`,
+        label,
+        filters: buildCurrentInvoiceSavedView()
+      }
+    ];
+    setCustomInvoiceSavedViews(nextViews);
+    writeSavedViewsForType('invoice', nextViews);
+    setInvoiceSavedViewName('');
+    toast.success('Invoice view saved');
+  };
+
+  const handleDeleteInvoiceSavedView = (viewId) => {
+    const nextViews = customInvoiceSavedViews.filter((entry) => entry.id !== viewId);
+    setCustomInvoiceSavedViews(nextViews);
+    writeSavedViewsForType('invoice', nextViews);
+  };
+
+  const handleSavePayoutSavedView = () => {
+    const label = payoutSavedViewName.trim();
+    if (!label) {
+      toast.error('Name the payout view first');
+      return;
+    }
+
+    const nextViews = [
+      ...customPayoutSavedViews,
+      {
+        id: `payout-${Date.now()}`,
+        label,
+        filters: buildCurrentPayoutSavedView()
+      }
+    ];
+    setCustomPayoutSavedViews(nextViews);
+    writeSavedViewsForType('payout', nextViews);
+    setPayoutSavedViewName('');
+    toast.success('Payout view saved');
+  };
+
+  const handleDeletePayoutSavedView = (viewId) => {
+    const nextViews = customPayoutSavedViews.filter((entry) => entry.id !== viewId);
+    setCustomPayoutSavedViews(nextViews);
+    writeSavedViewsForType('payout', nextViews);
   };
 
   const resetTemplateForm = () => {
@@ -623,7 +874,7 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
     }));
   };
 
-  const handleInvoiceComposerSubmit = async () => {
+  const buildInvoiceComposerPayload = () => {
     const payload = {
       recipientEmail: invoiceComposer.recipientEmail.trim(),
       description: invoiceComposer.description.trim() || undefined,
@@ -643,6 +894,19 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
         quantity: Number(item.quantity),
         unitAmount: Number(item.unitAmount)
       }));
+    }
+
+    return payload;
+  };
+
+  const handleInvoiceComposerSubmit = async () => {
+    const payload = buildInvoiceComposerPayload();
+
+    const confirmed = window.confirm(
+      `Create and send a hosted PayPal invoice for ${formatCents(invoiceDraftTotalCents, invoiceDraftCurrency)}? PayPal will create the customer payment link after submission.`
+    );
+    if (!confirmed) {
+      return;
     }
 
     setBusyAction('create-invoice');
@@ -670,26 +934,89 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
     }));
   };
 
+  const handleStripeConnectedAccountSelect = (accountId) => {
+    setSelectedStripeConnectedAccountId(accountId);
+    const account = stripeConnectedAccountsState.accounts.find((entry) => entry.id === accountId);
+    if (!account) {
+      return;
+    }
+
+    setPayoutComposer((previous) => ({
+      ...previous,
+      receiver: account.stripe_account_id,
+      recipientType: 'STRIPE_ACCOUNT',
+      receiverCountryCode: account.country_code || previous.receiverCountryCode || 'US'
+    }));
+  };
+
+  const buildPayoutComposerPayload = () => ({
+    provider: providerFilter || undefined,
+    receiver: payoutComposer.receiver.trim(),
+    recipientType: payoutComposer.recipientType,
+    receiverCountryCode: payoutComposer.receiverCountryCode.trim().toUpperCase() || undefined,
+    amount: Number(payoutComposer.amount),
+    currency: payoutComposer.currency.trim().toUpperCase(),
+    note: payoutComposer.note.trim() || undefined
+  });
+
+  useEffect(() => {
+    if (!showInvoiceComposer || !invoiceComposer.recipientEmail || invoiceDraftTotalCents <= 0) {
+      setInvoicePreview(null);
+      return undefined;
+    }
+
+    let active = true;
+    const timeoutId = window.setTimeout(async () => {
+      const result = await previewInvoice(buildInvoiceComposerPayload());
+      if (active) {
+        setInvoicePreview(result.success ? result.preview : null);
+      }
+    }, 300);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [invoiceComposer, invoiceDraftTotalCents, previewInvoice, showInvoiceComposer]);
+
+  useEffect(() => {
+    if (!showPayoutComposer || !payoutComposer.receiver || parseMoneyToCents(payoutComposer.amount) <= 0) {
+      setPayoutServerPreview(null);
+      return undefined;
+    }
+
+    let active = true;
+    const timeoutId = window.setTimeout(async () => {
+      const result = await previewPayout(buildPayoutComposerPayload());
+      if (active) {
+        setPayoutServerPreview(result.success ? result.preview : null);
+      }
+    }, 300);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [payoutComposer, previewPayout, showPayoutComposer]);
+
   const handlePayoutComposerSubmit = async () => {
     setBusyAction('create-payout');
-    const result = await createPayout({
-      receiver: payoutComposer.receiver.trim(),
-      recipientType: payoutComposer.recipientType,
-      receiverCountryCode: payoutComposer.receiverCountryCode.trim().toUpperCase() || undefined,
-      amount: Number(payoutComposer.amount),
-      currency: payoutComposer.currency.trim().toUpperCase(),
-      note: payoutComposer.note.trim() || undefined
-    });
+    const result = await createPayout(buildPayoutComposerPayload());
 
     if (result.success) {
-      const refreshedPayouts = await fetchPayouts();
+      const refreshedPayouts = await fetchPayouts(payoutQuery);
       await fetchPaymentIssues();
       const matchedPayout =
         refreshedPayouts.find((entry) => entry.payout_id === result.payout?.payout_id) || result.payout;
       setLastCreatedPayout(matchedPayout);
       resetPayoutComposer();
-      handleSectionJump('payouts');
-      toast.success('Official PayPal payout requested');
+      setSelectedStripeConnectedAccountId('');
+      if (isPayPalPayoutWorkspace) {
+        handlePayoutSandboxNavigation('activity');
+      } else {
+        handleSectionJump('payouts');
+      }
+      toast.success(isStripePayoutWorkspace ? 'Stripe payout requested' : 'Official PayPal payout requested');
     } else {
       toast.error(result.message || 'Failed to create payout');
     }
@@ -925,6 +1252,100 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
     setBusyAction('');
   };
 
+  const handleApprovePayout = async (payout) => {
+    setBusyAction(`approve:${payout.payout_id}`);
+    const result = await approvePayout(payout.payout_id);
+    if (result.success) {
+      await Promise.all([fetchPayouts(payoutQuery), fetchPaymentIssues()]);
+      toast.success('Payout approved');
+    } else {
+      toast.error(result.message || 'Failed to approve payout');
+    }
+    setBusyAction('');
+  };
+
+  const handleRejectPayout = async (payout, reason) => {
+    const confirmed = window.confirm(`Reject payout ${payout.payout_id}?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setBusyAction(`reject:${payout.payout_id}`);
+    const result = await rejectPayout(payout.payout_id, reason);
+    if (result.success) {
+      await Promise.all([fetchPayouts(payoutQuery), fetchPaymentIssues()]);
+      toast.success('Payout rejected');
+    } else {
+      toast.error(result.message || 'Failed to reject payout');
+    }
+    setBusyAction('');
+  };
+
+  const handleReleaseInvoiceFunds = async (invoice, amount, reason) => {
+    const confirmed = window.confirm(`Release funds for invoice ${invoice.summary?.invoice_number || invoice.invoice_id}?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setBusyAction(`release:${invoice.internal_invoice_id}`);
+    const result = await releaseInvoiceFunds(invoice.internal_invoice_id, {
+      amount: amount ? Number(amount) : undefined,
+      reason: reason || undefined
+    });
+    if (result.success) {
+      await Promise.all([fetchInvoices(), fetchPaymentIssues()]);
+      toast.success('Invoice funds released');
+    } else {
+      toast.error(result.message || 'Failed to release invoice funds');
+    }
+    setBusyAction('');
+  };
+
+  const handleMarkInvoiceReviewRequired = async (invoice) => {
+    const confirmed = window.confirm(`Mark invoice ${invoice.summary?.invoice_number || invoice.invoice_id} for settlement review?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setBusyAction(`review:${invoice.internal_invoice_id}`);
+    const result = await markInvoiceReviewRequired(invoice.internal_invoice_id, {
+      reason: 'Operator requested provider settlement review from admin workspace'
+    });
+    if (result.success) {
+      await Promise.all([fetchInvoices(), fetchPaymentIssues()]);
+      toast.success('Invoice marked for provider review');
+    } else {
+      toast.error(result.message || 'Failed to mark invoice for review');
+    }
+    setBusyAction('');
+  };
+
+  const handleAddRecordNote = async (record, type, note, onSaved) => {
+    setBusyAction(`note:${type}:${type === 'invoice' ? record.internal_invoice_id : record.payout_id}`);
+    const result =
+      type === 'invoice'
+        ? await addInvoiceNote(record.internal_invoice_id, note)
+        : await addPayoutNote(record.payout_id, note);
+    if (result.success) {
+      onSaved();
+      if (type === 'invoice') {
+        setInvoiceTimelineId(record.internal_invoice_id);
+        setInvoiceTimelineLoading(true);
+        setInvoiceTimelineEntries(await fetchInvoiceTimeline(record.internal_invoice_id, 15));
+        setInvoiceTimelineLoading(false);
+      } else {
+        setPayoutTimelineId(record.payout_id);
+        setPayoutTimelineLoading(true);
+        setPayoutTimelineEntries(await fetchPayoutTimeline(record.payout_id, 15));
+        setPayoutTimelineLoading(false);
+      }
+      toast.success('Operator note saved');
+    } else {
+      toast.error(result.message || 'Failed to save note');
+    }
+    setBusyAction('');
+  };
+
   const handleTopUpOrderComplete = async (order) => {
     const confirmed = window.confirm(
       `Approve funding order ${order.order_id} and credit ${Number(order.points || 0).toLocaleString()} points?`
@@ -1035,6 +1456,27 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
     setPayoutTimelineLoading(false);
   };
 
+  const payoutSandboxChrome = (
+    <PayPalSandboxPayoutChrome
+      adminTopUpOrders={adminTopUpOrders}
+      busyAction={busyAction}
+      filteredPayouts={filteredPayouts}
+      onNavigate={handlePayoutSandboxNavigation}
+      onOpenPayoutDetail={(payout) => setDetailDrawer({ type: 'payout', id: payout.payout_id })}
+      onPayoutComposerFieldChange={handlePayoutComposerFieldChange}
+      onPayoutComposerSubmit={handlePayoutComposerSubmit}
+      onRefreshAll={handleRefreshAll}
+      onResetPayoutComposer={resetPayoutComposer}
+      paymentIssues={paymentIssues}
+      payoutComposer={payoutComposer}
+      payoutImpactPreview={payoutImpactPreview}
+      payoutSandboxStatus={payoutSandboxStatus}
+      payoutSandboxView={payoutSandboxView}
+      payoutSandboxWallet={payoutSandboxWallet}
+      walletCurrency={walletCurrency}
+    />
+  );
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -1047,68 +1489,75 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
     <div className="space-y-8">
       {isPayPalEmbeddedWorkspace ? (
         <div
-          className="overflow-hidden rounded-[28px] border p-6 shadow-[0_24px_60px_rgba(0,48,135,0.08)]"
+          className={
+            isPayPalPayoutWorkspace
+              ? 'overflow-hidden bg-white'
+              : 'overflow-hidden rounded-[28px] border bg-white shadow-[0_24px_60px_rgba(0,48,135,0.08)]'
+          }
           style={{
-            borderColor: PAYPAL_BRAND.border,
-            background: `linear-gradient(135deg, ${PAYPAL_BRAND.mist} 0%, #ffffff 58%, rgba(0,156,222,0.08) 100%)`
+            borderColor: isPayPalPayoutWorkspace ? undefined : PAYPAL_BRAND.border,
+            background: isPayPalPayoutWorkspace ? '#ffffff' : `linear-gradient(135deg, ${PAYPAL_BRAND.mist} 0%, #ffffff 58%, rgba(0,156,222,0.08) 100%)`
           }}
         >
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-            <div className="max-w-3xl">
-              <img
-                src={PAYPAL_BRAND.logoUrl}
-                alt="PayPal"
-                className="h-10 w-auto"
-              />
-              <h2 className="mt-5 text-3xl font-black tracking-[-0.05em]" style={{ color: PAYPAL_BRAND.ink }}>
-                {isPayPalInvoiceWorkspace ? 'PayPal Invoicing' : 'PayPal Payouts'}
-              </h2>
-              <p className="mt-3 text-sm leading-7 text-slate-600">
-                {isPayPalInvoiceWorkspace
-                  ? 'Create, send, and manage official PayPal invoices with hosted links, reminder controls, QR generation, and template-backed workflows in one operational surface.'
-                  : 'Send money to recipients using their email, phone number, or PayPal ID while keeping review, fee, and provider-state controls visible in one operational surface.'}
-              </p>
-              <div className="mt-5 flex flex-wrap gap-2">
-                {(isPayPalInvoiceWorkspace
-                  ? ['Hosted invoice links', 'Template backed', 'Reminder aware', 'QR ready']
-                  : ['Balance-funded', 'Review aware', 'Provider synced', 'Remediation ready']).map((chip) => (
-                  <div
-                    key={chip}
-                    className="inline-flex rounded-full border px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.16em]"
-                    style={{
-                      borderColor: PAYPAL_BRAND.border,
-                      backgroundColor: '#ffffff',
-                      color: PAYPAL_BRAND.blue
-                    }}
-                  >
-                    {chip}
-                  </div>
-                ))}
+          {isPayPalPayoutWorkspace ? (
+            <>
+            {payoutSandboxChrome}
+            </>
+          ) : (
+            <div className="flex flex-col gap-6 p-6 lg:flex-row lg:items-start lg:justify-between">
+              <div className="max-w-3xl">
+                <img
+                  src={PAYPAL_BRAND.logoUrl}
+                  alt="PayPal"
+                  className="h-10 w-auto"
+                />
+                <h2 className="mt-5 text-3xl font-black tracking-[-0.05em]" style={{ color: PAYPAL_BRAND.ink }}>
+                  PayPal Invoicing
+                </h2>
+                <p className="mt-3 text-sm leading-7 text-slate-600">
+                  Create, send, and manage official PayPal invoices with hosted links, reminder controls, QR generation, and template-backed workflows in one operational surface.
+                </p>
+                <div className="mt-5 flex flex-wrap gap-2">
+                  {['Hosted invoice links', 'Template backed', 'Reminder aware', 'QR ready'].map((chip) => (
+                    <div
+                      key={chip}
+                      className="inline-flex rounded-full border px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.16em]"
+                      style={{
+                        borderColor: PAYPAL_BRAND.border,
+                        backgroundColor: '#ffffff',
+                        color: PAYPAL_BRAND.blue
+                      }}
+                    >
+                      {chip}
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 lg:w-[320px] lg:grid-cols-1">
-              <div className="rounded-[22px] border bg-white p-4 shadow-sm" style={{ borderColor: PAYPAL_BRAND.border }}>
-                <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
-                  {isPayPalInvoiceWorkspace ? 'Invoice Surface' : 'Recipient Types'}
-                </p>
-                <p className="mt-3 text-lg font-black tracking-[-0.03em]" style={{ color: PAYPAL_BRAND.ink }}>
-                  {isPayPalInvoiceWorkspace ? 'Hosted links + records' : 'Email, Phone, PayPal ID'}
-                </p>
-              </div>
-              <div className="rounded-[22px] border bg-white p-4 shadow-sm" style={{ borderColor: PAYPAL_BRAND.border }}>
-                <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
-                  {isPayPalInvoiceWorkspace ? 'Operational Model' : 'Funding Model'}
-                </p>
-                <p className="mt-3 text-lg font-black tracking-[-0.03em]" style={{ color: PAYPAL_BRAND.ink }}>
-                  {isPayPalInvoiceWorkspace ? 'Send, sync, remind, reconcile' : 'PayPal Balance + Fees'}
-                </p>
+              <div className="grid gap-3 sm:grid-cols-2 lg:w-[320px] lg:grid-cols-1">
+                <div className="rounded-[22px] border bg-white p-4 shadow-sm" style={{ borderColor: PAYPAL_BRAND.border }}>
+                  <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
+                    Invoice Surface
+                  </p>
+                  <p className="mt-3 text-lg font-black tracking-[-0.03em]" style={{ color: PAYPAL_BRAND.ink }}>
+                    Hosted links + records
+                  </p>
+                </div>
+                <div className="rounded-[22px] border bg-white p-4 shadow-sm" style={{ borderColor: PAYPAL_BRAND.border }}>
+                  <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
+                    Operational Model
+                  </p>
+                  <p className="mt-3 text-lg font-black tracking-[-0.03em]" style={{ color: PAYPAL_BRAND.ink }}>
+                    Send, sync, remind, reconcile
+                  </p>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </div>
       ) : null}
 
+      {renderSummaryCards ? (
       <div className={`grid grid-cols-1 gap-6 md:grid-cols-2 ${embedded ? 'xl:grid-cols-2' : 'xl:grid-cols-4'}`}>
         {visibleSummary.map(({ icon: Icon, label, value, tone }) => (
           <div
@@ -1138,7 +1587,9 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
           </div>
         ))}
       </div>
+      ) : null}
 
+      {renderWorkspaceControls ? (
       <div
         className="rounded-2xl border bg-white p-6 shadow-sm"
         style={isPayPalEmbeddedWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
@@ -1158,7 +1609,7 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
               onClick={() =>
                 Promise.all([
                   fetchInvoices(),
-                  fetchPayouts(),
+                  fetchPayouts(payoutQuery),
                   fetchAdminTopUpOrders(),
                   fetchInvoiceReminderConfigurations(),
                   fetchInvoiceTemplates(),
@@ -1194,11 +1645,13 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <p className="text-xs font-black uppercase tracking-[0.18em]" style={{ color: PAYPAL_BRAND.blue }}>
-                Official PayPal Workflow
+                Official {providerFilter === 'stripe' ? 'Stripe' : providerFilter === 'crypto' ? 'Crypto' : 'PayPal'} Workflow
               </p>
               <p className="mt-1 text-sm text-slate-600">
-                {isPayPalPayoutWorkspace
-                  ? 'Request, review, refresh, and remediate payouts from the same PayPal-branded operational surface.'
+                {isStripePayoutWorkspace
+                  ? 'Select a connected account, preview transfer readiness, request approval, and process Stripe payouts from this operational surface.'
+                  : isPayPalPayoutWorkspace
+                    ? 'Request, review, refresh, and remediate payouts from the same PayPal-branded operational surface.'
                   : isPayPalInvoiceWorkspace
                     ? 'Create, send, remind, sync, and manage official invoices from the same PayPal-branded operational surface.'
                   : 'Deep-link into the exact operational surface you need instead of scanning the entire admin panel.'}
@@ -1237,9 +1690,10 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
           </div>
         </div>
       </div>
+      ) : null}
 
       {showInvoiceComposer ? (
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div ref={registerSectionRef('payout-composer')} className="grid scroll-mt-28 grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
           <div
             className="rounded-2xl border bg-white p-6 shadow-sm"
             style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border, boxShadow: '0 20px 44px rgba(0,48,135,0.06)' } : undefined}
@@ -1335,6 +1789,20 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
                 <div className="mt-3 text-xs text-gray-600">
                   {selectedInvoiceTemplate.line_items?.length || 0} line items · {selectedInvoiceTemplate.currency_code} · Due in {selectedInvoiceTemplate.default_due_days ?? 'manual'} days
                 </div>
+                <div className="mt-3 divide-y divide-blue-100 rounded-lg bg-white">
+                  {(selectedInvoiceTemplate.line_items || []).map((item, index) => (
+                    <div key={`${selectedInvoiceTemplate.id}-preview-${index}`} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <span className="font-semibold text-gray-700">{item.name || `Line item ${index + 1}`}</span>
+                      <span className="text-gray-600">
+                        {Number(item.quantity || 0)} x {formatCents(parseMoneyToCents(item.unitAmount), selectedInvoiceTemplate.currency_code)}
+                      </span>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between px-3 py-2 text-sm font-black text-gray-950">
+                    <span>Template total</span>
+                    <span>{formatCents(invoiceDraftTotalCents, invoiceDraftCurrency)}</span>
+                  </div>
+                </div>
               </div>
             ) : (
               <div className="mt-4 rounded-xl border border-gray-100 bg-gray-50 p-4">
@@ -1402,6 +1870,9 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
                         />
                       </div>
                       <div className="mt-3 flex justify-end">
+                        <div className="mr-auto text-xs font-semibold text-gray-500">
+                          Subtotal: {formatCents(calculateLineItemSubtotalCents(item), invoiceDraftCurrency)}
+                        </div>
                         <button
                           onClick={() => removeInvoiceComposerLineItem(index)}
                           disabled={invoiceComposer.items.length === 1}
@@ -1435,11 +1906,26 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
               className="rounded-2xl border bg-white p-5 shadow-sm"
               style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
             >
-              <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Composer Notes</p>
-              <div className="mt-4 space-y-3 text-sm text-slate-600">
-                <p>Template mode uses your saved PayPal invoice defaults and line items.</p>
-                <p>Manual mode sends the invoice with explicit currency and item values from this page.</p>
-                <p>The created invoice will appear immediately in the official records table below.</p>
+              <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Draft Preview</p>
+              <div className="mt-4 space-y-3">
+                <DetailRow label="Recipient" value={invoiceComposer.recipientEmail || 'Add recipient email'} />
+                <DetailRow
+                  label="Template"
+                  value={selectedInvoiceTemplate ? selectedInvoiceTemplate.name : 'Manual line items'}
+                />
+                <DetailRow label="Line Items" value={`${invoiceDraftItems.length} item${invoiceDraftItems.length === 1 ? '' : 's'}`} />
+                <DetailRow
+                  label="Draft Total"
+                  value={
+                    invoicePreview
+                      ? `${invoicePreview.total} ${invoicePreview.currency}`
+                      : formatCents(invoiceDraftTotalCents, invoiceDraftCurrency)
+                  }
+                />
+                <DetailRow label="Risk Path" value={invoicePreview?.risk_decision || 'Preview pending'} />
+                <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-900">
+                  PayPal will create the hosted invoice link after you confirm submission.
+                </div>
               </div>
             </div>
 
@@ -1491,181 +1977,25 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
         </div>
       ) : null}
 
-      {showPayoutComposer ? (
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
-          <div
-            className="rounded-2xl border bg-white p-6 shadow-sm"
-            style={{ borderColor: PAYPAL_BRAND.border, boxShadow: '0 20px 44px rgba(0,48,135,0.06)' }}
-          >
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <h3 className="text-xl font-bold" style={{ color: PAYPAL_BRAND.ink }}>
-                  Quick Create Official Payout
-                </h3>
-                <p className="mt-1 text-sm text-gray-500">
-                  Request a real PayPal payout from this workspace and let the policy, fee, and approval flow resolve naturally.
-                </p>
-              </div>
-              <button
-                onClick={resetPayoutComposer}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
-              >
-                Reset
-              </button>
-            </div>
-
-            <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Receiver</label>
-                <input
-                  value={payoutComposer.receiver}
-                  onChange={(event) => handlePayoutComposerFieldChange('receiver', event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                  placeholder="recipient@example.com"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Recipient Type</label>
-                <select
-                  value={payoutComposer.recipientType}
-                  onChange={(event) => handlePayoutComposerFieldChange('recipientType', event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                >
-                  <option value="EMAIL">EMAIL</option>
-                  <option value="PHONE">PHONE</option>
-                  <option value="PAYPAL_ID">PAYPAL_ID</option>
-                </select>
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Amount</label>
-                <input
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={payoutComposer.amount}
-                  onChange={(event) => handlePayoutComposerFieldChange('amount', event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                  placeholder="25.00"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Currency</label>
-                <input
-                  value={payoutComposer.currency}
-                  onChange={(event) => handlePayoutComposerFieldChange('currency', event.target.value)}
-                  maxLength={3}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm uppercase focus:border-orange-400 focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Receiver Country</label>
-                <input
-                  value={payoutComposer.receiverCountryCode}
-                  onChange={(event) => handlePayoutComposerFieldChange('receiverCountryCode', event.target.value)}
-                  maxLength={2}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm uppercase focus:border-orange-400 focus:outline-none"
-                  placeholder="US"
-                />
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <label className="mb-1 block text-sm font-medium text-gray-700">Note</label>
-              <textarea
-                value={payoutComposer.note}
-                onChange={(event) => handlePayoutComposerFieldChange('note', event.target.value)}
-                rows={3}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                placeholder="Optional payout note"
-              />
-            </div>
-
-            <div className="mt-5 flex flex-wrap gap-3">
-              <button
-                onClick={handlePayoutComposerSubmit}
-                disabled={busyAction === 'create-payout'}
-                className="inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-                style={{ backgroundColor: PAYPAL_BRAND.blue }}
-              >
-                <Send size={16} className={busyAction === 'create-payout' ? 'animate-pulse' : ''} />
-                Request Official Payout
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div
-              className="rounded-2xl border bg-white p-5 shadow-sm"
-              style={{ borderColor: PAYPAL_BRAND.border }}
-            >
-              <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Flow Notes</p>
-              <div className="mt-4 space-y-3 text-sm text-slate-600">
-                <p>Payout requests can enter manual review based on configured thresholds and policy rules.</p>
-                <p>Fees and total debit are computed server-side and reflected in the payout records after creation.</p>
-                <p>Provider submission, holds, and unclaimed-item remediation continue in the workspace below.</p>
-              </div>
-            </div>
-
-            {lastCreatedPayout ? (
-              <div
-                className="rounded-2xl border p-5 shadow-sm"
-                style={{
-                  borderColor: PAYPAL_BRAND.border,
-                  background: 'linear-gradient(180deg, rgba(0,156,222,0.08), rgba(255,255,255,1))'
-                }}
-              >
-                <p className="text-xs font-black uppercase tracking-[0.18em]" style={{ color: PAYPAL_BRAND.blue }}>
-                  Last Requested
-                </p>
-                <p className="mt-3 text-lg font-black tracking-[-0.03em]" style={{ color: PAYPAL_BRAND.ink }}>
-                  {lastCreatedPayout.payout_id}
-                </p>
-                <div className="mt-2 text-sm text-slate-600">
-                  {lastCreatedPayout.summary?.receiver || payoutComposer.receiver}
-                </div>
-                <div className="mt-1 text-sm font-semibold text-slate-900">
-                  {lastCreatedPayout.summary?.amount || Number(lastCreatedPayout.amount || 0).toFixed?.(2) || '--'} {lastCreatedPayout.summary?.currency || payoutComposer.currency}
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <StatusPill
-                    value={lastCreatedPayout.status || 'REQUESTED'}
-                    tone={
-                      lastCreatedPayout.status === 'SUCCESS'
-                        ? 'green'
-                        : lastCreatedPayout.status === 'FAILED' || lastCreatedPayout.status === 'DENIED'
-                          ? 'red'
-                          : 'blue'
-                    }
-                  />
-                  {lastCreatedPayout.risk_decision ? (
-                    <StatusPill
-                      value={lastCreatedPayout.risk_decision}
-                      tone={
-                        lastCreatedPayout.risk_decision === 'APPROVED'
-                          ? 'green'
-                          : lastCreatedPayout.risk_decision === 'BLOCKED'
-                            ? 'red'
-                            : 'amber'
-                      }
-                    />
-                  ) : null}
-                </div>
-                <div className="mt-4">
-                  <button
-                    onClick={() => handleSectionJump('payouts')}
-                    className="inline-flex items-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-white"
-                  >
-                    <Wallet size={14} />
-                    View In Records
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </div>
+      {renderPayoutComposer ? (
+        <PayoutComposerSection
+          busyAction={busyAction}
+          isStripePayoutWorkspace={isStripePayoutWorkspace}
+          lastCreatedPayout={lastCreatedPayout}
+          onPayoutComposerFieldChange={handlePayoutComposerFieldChange}
+          onPayoutComposerSubmit={handlePayoutComposerSubmit}
+          onResetPayoutComposer={resetPayoutComposer}
+          onStripeConnectedAccountSelect={handleStripeConnectedAccountSelect}
+          payoutComposer={payoutComposer}
+          payoutImpactPreview={payoutImpactPreview}
+          payoutSandboxWallet={payoutSandboxWallet}
+          selectedStripeConnectedAccountId={selectedStripeConnectedAccountId}
+          stripeConnectedAccountsState={stripeConnectedAccountsState}
+          walletCurrency={walletCurrency}
+        />
       ) : null}
 
-      {showFundingOrders ? (
+      {renderFundingOrders ? (
         <div ref={registerSectionRef('funding-orders')} className="scroll-mt-28 space-y-4">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -1882,7 +2212,7 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
         </div>
       ) : null}
 
-      {showPaymentIssues ? (
+      {renderPaymentIssues ? (
         <div ref={registerSectionRef('payment-issues')} className="scroll-mt-28 space-y-4">
         <div className="flex items-center justify-between">
           <h3
@@ -2235,19 +2565,28 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
             >
               Invoices
             </h3>
-            <p className="text-sm text-gray-500">{filteredInvoices.length} of {invoices.length} official invoice records</p>
+            <p className="text-sm text-gray-500">
+              {filteredInvoices.length} shown
+              {invoicePagination?.total ? ` of ${invoicePagination.total}` : ` of ${invoices.length}`} official invoice records
+            </p>
           </div>
-          <div className="flex flex-col gap-3 md:flex-row">
+          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-7">
             <input
               value={invoiceSearch}
               onChange={(event) => setInvoiceSearch(event.target.value)}
-              placeholder="Search invoice, recipient, description"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none md:w-[280px]"
+              placeholder="Recipient or number"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+            />
+            <input
+              value={invoiceProviderSearch}
+              onChange={(event) => setInvoiceProviderSearch(event.target.value)}
+              placeholder="PayPal invoice ID"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
             />
             <select
               value={invoiceStatusFilter}
               onChange={(event) => setInvoiceStatusFilter(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none md:w-[180px]"
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
             >
               {invoiceStatusOptions.map((status) => (
                 <option key={status} value={status}>
@@ -2255,6 +2594,115 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
                 </option>
               ))}
             </select>
+            <select
+              value={invoiceTemplateFilter}
+              onChange={(event) => setInvoiceTemplateFilter(event.target.value)}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+              aria-label="Invoice template"
+            >
+              <option value="ALL">All templates</option>
+              {invoiceTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name}
+                </option>
+              ))}
+            </select>
+            <input
+              type="date"
+              value={invoiceDateFrom}
+              onChange={(event) => setInvoiceDateFrom(event.target.value)}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+              aria-label="Invoice date from"
+            />
+            <input
+              type="date"
+              value={invoiceDateTo}
+              onChange={(event) => setInvoiceDateTo(event.target.value)}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+              aria-label="Invoice date to"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={invoiceSortBy}
+                onChange={(event) => setInvoiceSortBy(event.target.value)}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+                aria-label="Invoice sort field"
+              >
+                <option value="createdAt">Created</option>
+                <option value="updatedAt">Updated</option>
+                <option value="amount">Amount</option>
+                <option value="recipient">Recipient</option>
+                <option value="status">Status</option>
+                <option value="dueDate">Due</option>
+              </select>
+              <select
+                value={invoiceSortDirection}
+                onChange={(event) => setInvoiceSortDirection(event.target.value)}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+                aria-label="Invoice sort direction"
+              >
+                <option value="desc">Desc</option>
+                <option value="asc">Asc</option>
+              </select>
+            </div>
+            <select
+              value={invoicePageSize}
+              onChange={(event) => setInvoicePageSize(event.target.value)}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+              aria-label="Invoice page size"
+            >
+              <option value="25">25 rows</option>
+              <option value="50">50 rows</option>
+              <option value="100">100 rows</option>
+              <option value="250">250 rows</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {BUILT_IN_INVOICE_SAVED_VIEWS.map((view) => (
+            <button
+              key={view.id}
+              onClick={() => applyInvoiceSavedView(view.id)}
+              className="inline-flex rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
+            >
+              {view.label}
+            </button>
+          ))}
+          {customInvoiceSavedViews.map((view) => (
+            <span key={view.id} className="inline-flex overflow-hidden rounded-full border border-blue-200 bg-blue-50">
+              <button
+                type="button"
+                onClick={() => applyInvoiceSavedView(view.id)}
+                className="px-3 py-1.5 text-xs font-bold text-blue-800 hover:bg-blue-100"
+              >
+                {view.label}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDeleteInvoiceSavedView(view.id)}
+                className="border-l border-blue-200 px-2 text-blue-700 hover:bg-blue-100"
+                aria-label={`Delete ${view.label}`}
+              >
+                <X size={13} />
+              </button>
+            </span>
+          ))}
+          <div className="flex min-w-[240px] overflow-hidden rounded-full border border-gray-300 bg-white">
+            <input
+              value={invoiceSavedViewName}
+              onChange={(event) => setInvoiceSavedViewName(event.target.value)}
+              placeholder="Save current invoice view"
+              className="min-w-0 flex-1 px-3 py-1.5 text-xs font-semibold text-gray-700 outline-none"
+            />
+            <button
+              type="button"
+              onClick={handleSaveInvoiceSavedView}
+              className="inline-flex items-center gap-1 border-l border-gray-200 px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
+            >
+              <Plus size={13} />
+              Save
+            </button>
           </div>
         </div>
 
@@ -2349,6 +2797,13 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
                         </div>
                       </td>
                       <td className="px-6 py-4">
+                        <button
+                          onClick={() => setDetailDrawer({ type: 'invoice', id: invoice.internal_invoice_id })}
+                          className="mb-2 inline-flex items-center gap-1 rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50"
+                        >
+                          <Eye size={14} />
+                          Details
+                        </button>
                         <InvoiceActions
                           invoice={invoice}
                           busyAction={busyAction}
@@ -2363,6 +2818,7 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
                             handleInvoiceAction('qr', item, generateInvoiceQr, 'Official PayPal QR generated')
                           }
                           onCancel={handleInvoiceCancel}
+                          onReviewRequired={handleMarkInvoiceReviewRequired}
                           onTimelineToggle={toggleInvoiceTimeline}
                           timelineOpen={invoiceTimelineId === invoice.internal_invoice_id}
                         />
@@ -2390,11 +2846,16 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
           {filteredInvoices.length === 0 && (
             <div className="px-6 py-10 text-center text-sm text-gray-500">No invoices yet.</div>
           )}
+          <PaginationControls
+            pagination={invoicePagination}
+            onPrevious={() => setInvoicePage((page) => Math.max(1, page - 1))}
+            onNext={() => setInvoicePage((page) => page + 1)}
+          />
         </div>
         </div>
       ) : null}
 
-      {showPayouts ? (
+      {renderPayoutActivity ? (
         <div ref={registerSectionRef('payouts')} className="scroll-mt-28 space-y-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
@@ -2402,21 +2863,24 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
               className="text-lg font-bold text-gray-900"
               style={isPayPalPayoutWorkspace ? { color: PAYPAL_BRAND.ink } : undefined}
             >
-              Payouts
+              {isPayPalPayoutWorkspace ? 'Activity' : 'Payouts'}
             </h3>
-            <p className="text-sm text-gray-500">{filteredPayouts.length} of {payouts.length} tracked payout records</p>
+            <p className="text-sm text-gray-500">
+              {filteredPayouts.length} shown
+              {payoutPagination?.total ? ` of ${payoutPagination.total}` : ` of ${payouts.length}`} tracked payout records
+            </p>
           </div>
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
             <input
               value={payoutSearch}
               onChange={(event) => setPayoutSearch(event.target.value)}
-              placeholder="Search payout, receiver, batch"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none md:w-[260px]"
+              placeholder="Recipient, payout, batch"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
             />
             <select
               value={payoutStatusFilter}
               onChange={(event) => setPayoutStatusFilter(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none md:w-[180px]"
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
             >
               {payoutStatusOptions.map((status) => (
                 <option key={status} value={status}>
@@ -2427,7 +2891,7 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
             <select
               value={payoutProviderFilter}
               onChange={(event) => setPayoutProviderFilter(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none md:w-[190px]"
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
             >
               {payoutProviderOptions.map((status) => (
                 <option key={status} value={status}>
@@ -2435,17 +2899,118 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
                 </option>
               ))}
             </select>
+            <input
+              type="date"
+              value={payoutDateFrom}
+              onChange={(event) => setPayoutDateFrom(event.target.value)}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+              aria-label="Payout date from"
+            />
+            <input
+              type="date"
+              value={payoutDateTo}
+              onChange={(event) => setPayoutDateTo(event.target.value)}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+              aria-label="Payout date to"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={payoutSortBy}
+                onChange={(event) => setPayoutSortBy(event.target.value)}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+                aria-label="Payout sort field"
+              >
+                <option value="createdAt">Created</option>
+                <option value="updatedAt">Updated</option>
+                <option value="amount">Amount</option>
+                <option value="receiver">Receiver</option>
+                <option value="status">Status</option>
+              </select>
+              <select
+                value={payoutSortDirection}
+                onChange={(event) => setPayoutSortDirection(event.target.value)}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+                aria-label="Payout sort direction"
+              >
+                <option value="desc">Desc</option>
+                <option value="asc">Asc</option>
+              </select>
+            </div>
+            <select
+              value={payoutPageSize}
+              onChange={(event) => setPayoutPageSize(event.target.value)}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
+              aria-label="Payout page size"
+            >
+              <option value="25">25 rows</option>
+              <option value="50">50 rows</option>
+              <option value="100">100 rows</option>
+              <option value="250">250 rows</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {BUILT_IN_PAYOUT_SAVED_VIEWS.map((view) => (
+            <button
+              key={view.id}
+              onClick={() => applyPayoutSavedView(view.id)}
+              className="inline-flex rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
+            >
+              {view.label}
+            </button>
+          ))}
+          {customPayoutSavedViews.map((view) => (
+            <span key={view.id} className="inline-flex overflow-hidden rounded-full border border-blue-200 bg-blue-50">
+              <button
+                type="button"
+                onClick={() => applyPayoutSavedView(view.id)}
+                className="px-3 py-1.5 text-xs font-bold text-blue-800 hover:bg-blue-100"
+              >
+                {view.label}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDeletePayoutSavedView(view.id)}
+                className="border-l border-blue-200 px-2 text-blue-700 hover:bg-blue-100"
+                aria-label={`Delete ${view.label}`}
+              >
+                <X size={13} />
+              </button>
+            </span>
+          ))}
+          <div className="flex min-w-[240px] overflow-hidden rounded-full border border-gray-300 bg-white">
+            <input
+              value={payoutSavedViewName}
+              onChange={(event) => setPayoutSavedViewName(event.target.value)}
+              placeholder="Save current payout view"
+              className="min-w-0 flex-1 px-3 py-1.5 text-xs font-semibold text-gray-700 outline-none"
+            />
+            <button
+              type="button"
+              onClick={handleSavePayoutSavedView}
+              className="inline-flex items-center gap-1 border-l border-gray-200 px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
+            >
+              <Plus size={13} />
+              Save
+            </button>
           </div>
         </div>
 
         {isPayPalPayoutWorkspace ? (
           <div
-            className="rounded-2xl border p-4"
+            className="rounded-2xl border bg-white p-4"
             style={{
               borderColor: PAYPAL_BRAND.border,
-              background: 'linear-gradient(180deg, rgba(0,156,222,0.06), rgba(255,255,255,1))'
+              boxShadow: '0 14px 34px rgba(0,20,53,0.05)'
             }}
           >
+            <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm font-black" style={{ color: PAYPAL_BRAND.ink }}>Provider states</p>
+              <p className="text-xs font-semibold" style={{ color: PAYPAL_BRAND.muted }}>
+                PayPal sandbox item statuses mapped into the payout queue
+              </p>
+            </div>
             <div className="flex flex-wrap gap-2">
               {[
                 'PENDING: provider processing',
@@ -2457,7 +3022,7 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
                 <div
                   key={item}
                   className="inline-flex rounded-full border bg-white px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.14em]"
-                  style={{ borderColor: PAYPAL_BRAND.border, color: PAYPAL_BRAND.blue }}
+                  style={{ borderColor: PAYPAL_BRAND.border, color: PAYPAL_BRAND.actionBlue }}
                 >
                   {item}
                 </div>
@@ -2471,14 +3036,14 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
           style={isPayPalPayoutWorkspace ? { borderColor: PAYPAL_BRAND.border, boxShadow: '0 18px 40px rgba(0,48,135,0.06)' } : undefined}
         >
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1040px]">
+            <table className={`w-full ${isPayPalPayoutWorkspace ? 'min-w-[860px]' : 'min-w-[1040px]'}`}>
               <thead
                 className="border-b bg-gray-50"
                 style={
                   isPayPalPayoutWorkspace
                     ? {
                         borderColor: PAYPAL_BRAND.border,
-                        background: 'linear-gradient(180deg, rgba(0,48,135,0.06), rgba(244,248,255,1))'
+                        backgroundColor: PAYPAL_BRAND.shell
                       }
                     : undefined
                 }
@@ -2556,6 +3121,13 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
                         )}
                       </td>
                       <td className="px-6 py-4">
+                        <button
+                          onClick={() => setDetailDrawer({ type: 'payout', id: payout.payout_id })}
+                          className="mb-2 inline-flex items-center gap-1 rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50"
+                        >
+                          <Eye size={14} />
+                          Details
+                        </button>
                         <PayoutActions
                           payout={payout}
                           busyAction={busyAction}
@@ -2588,9 +3160,49 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false }) {
           {filteredPayouts.length === 0 && (
             <div className="px-6 py-10 text-center text-sm text-gray-500">No payouts yet.</div>
           )}
+          <PaginationControls
+            pagination={payoutPagination}
+            onPrevious={() => setPayoutPage((page) => Math.max(1, page - 1))}
+            onNext={() => setPayoutPage((page) => page + 1)}
+          />
         </div>
         </div>
       ) : null}
+
+      <PaymentRecordDrawer
+        record={detailDrawer.type === 'invoice' ? selectedInvoiceRecord : selectedPayoutRecord}
+        type={detailDrawer.type}
+        busyAction={busyAction}
+        onClose={() => setDetailDrawer({ type: '', id: '' })}
+        invoiceActions={{
+          onRefresh: (item) => handleInvoiceAction('refresh', item, refreshInvoice, 'Invoice refreshed'),
+          onReminder: (item) => handleInvoiceAction('remind', item, sendInvoiceReminder, 'Reminder sent'),
+          onCancelReminders: handleInvoiceReminderCancellation,
+          onQr: (item) => handleInvoiceAction('qr', item, generateInvoiceQr, 'Official PayPal QR generated'),
+          onCancel: handleInvoiceCancel,
+          onReviewRequired: handleMarkInvoiceReviewRequired,
+          onTimelineToggle: toggleInvoiceTimeline
+        }}
+        payoutActions={{
+          onRefresh: handlePayoutRefresh,
+          onCancelUnclaimed: handleCancelUnclaimedPayout,
+          onTimelineToggle: togglePayoutTimeline
+        }}
+        adminActions={{
+          onApprovePayout: handleApprovePayout,
+          onRejectPayout: handleRejectPayout,
+          onReleaseInvoice: handleReleaseInvoiceFunds,
+          onAddNote: handleAddRecordNote
+        }}
+        timeline={{
+          open:
+            detailDrawer.type === 'invoice'
+              ? invoiceTimelineId === selectedInvoiceRecord?.internal_invoice_id
+              : payoutTimelineId === selectedPayoutRecord?.payout_id,
+          loading: detailDrawer.type === 'invoice' ? invoiceTimelineLoading : payoutTimelineLoading,
+          entries: detailDrawer.type === 'invoice' ? invoiceTimelineEntries : payoutTimelineEntries
+        }}
+      />
     </div>
   );
 }

@@ -94,6 +94,29 @@ CREATE TABLE IF NOT EXISTS payout_batches (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS stripe_connected_accounts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT,
+  stripe_account_id TEXT NOT NULL UNIQUE,
+  email TEXT,
+  country_code TEXT,
+  business_type TEXT,
+  status TEXT NOT NULL,
+  charges_enabled INTEGER NOT NULL DEFAULT 0,
+  payouts_enabled INTEGER NOT NULL DEFAULT 0,
+  details_submitted INTEGER NOT NULL DEFAULT 0,
+  requirements_json TEXT,
+  capabilities_json TEXT,
+  disabled_reason TEXT,
+  metadata_json TEXT,
+  created_by_actor_id TEXT,
+  last_onboarding_link_created_at TEXT,
+  last_synced_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS payouts (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -368,6 +391,10 @@ CREATE INDEX IF NOT EXISTS idx_payouts_user_created_at
   ON payouts (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_payouts_receiver_created_at
   ON payouts (receiver, created_at);
+CREATE INDEX IF NOT EXISTS idx_stripe_connected_accounts_user_created_at
+  ON stripe_connected_accounts (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_stripe_connected_accounts_status
+  ON stripe_connected_accounts (status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_entity_created_at
   ON audit_logs (entity_type, entity_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_created_at

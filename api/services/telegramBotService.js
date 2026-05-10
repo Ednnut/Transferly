@@ -90,6 +90,27 @@ async function handleHistory(account) {
   };
 }
 
+async function handleServiceHistory(account, parsedCommand) {
+  const serviceSlug = parsedCommand.args[0];
+  if (!serviceSlug) {
+    return handleHistory(account);
+  }
+
+  const receipts = await slipcraftReceiptService.getReceiptHistory(account.userId, 50);
+  const serviceReceipts = receipts
+    .filter((receipt) => {
+      const details = receipt.data?.details || {};
+      return String(details.service || '').toLowerCase() === String(serviceSlug).toLowerCase();
+    })
+    .slice(0, 10);
+
+  return {
+    ok: true,
+    message: `Found ${serviceReceipts.length} ${serviceSlug} receipts.`,
+    data: serviceReceipts
+  };
+}
+
 async function handleReferral(account) {
   const stats = await referralService.getStats(account.userId);
   return {
@@ -127,7 +148,7 @@ async function dispatchCommand(account, parsedCommand) {
       return handleGenerateReceipt(account, parsedCommand);
     case '/history':
       await resolveLinkedUser(account);
-      return handleHistory(account);
+      return handleServiceHistory(account, parsedCommand);
     case '/referral':
       await resolveLinkedUser(account);
       return handleReferral(account);

@@ -6,6 +6,7 @@ const {
   adminFaqParamsSchema,
   adminFaqUpdateSchema,
   adminInvoiceTemplateCreateSchema,
+  adminRecordNoteSchema,
   adminInvoiceReminderParamsSchema,
   adminInvoiceReminderUpdateSchema,
   adminInvoiceTemplateParamsSchema,
@@ -16,6 +17,7 @@ const {
   adminUserIdParamsSchema,
   listPaymentOpsIssuesQuerySchema,
   listInvoiceReminderConfigurationsQuerySchema,
+  listAdminInvoicesQuerySchema,
   listAdminPayoutsQuerySchema,
   listTopUpOrdersQuerySchema,
   listDeadLetterJobsQuerySchema,
@@ -24,12 +26,18 @@ const {
   paymentOpsIssueActionSchema,
   paymentOpsIssueParamsSchema,
   releaseInvoiceFundsSchema,
+  markInvoiceReviewRequiredSchema,
   runPaymentReconciliationSchema,
+  stripeAccountLinkCreateSchema,
+  stripeConnectedAccountCreateSchema,
+  stripeConnectedAccountListQuerySchema,
+  stripeConnectedAccountParamsSchema,
   topUpOrderAdminActionSchema,
   topUpOrderParamsSchema
 } = require('../schemas/adminSchemas');
 const {
   presentAdminPayout,
+  presentAdminInvoice,
   presentAdminUser,
   presentDeadLetterJob,
   presentFundRelease,
@@ -40,22 +48,33 @@ const {
   presentRiskFlag,
   presentWebhookEvent
 } = require('../presenters/adminPresenter');
+const { invoiceRepository } = require('../repositories/invoiceRepository');
 const { payoutRepository } = require('../repositories/payoutRepository');
 const { riskFlagRepository } = require('../repositories/riskFlagRepository');
 const { webhookEventRepository } = require('../repositories/webhookEventRepository');
 const { payoutParamsSchema, rejectPayoutSchema } = require('../schemas/payoutSchemas');
 const { adminContentService } = require('../services/adminContentService');
+const { auditLogService } = require('../services/auditLogService');
 const { opsService } = require('../services/opsService');
+const { paymentProviderRegistry } = require('../services/paymentProviderRegistry');
 const { paypalInvoiceService } = require('../services/paypalInvoiceService');
+const { providerBalanceService } = require('../services/providerBalanceService');
+const { providerInvoiceService } = require('../services/providerInvoiceService');
 const { invoiceTemplateService } = require('../services/invoiceTemplateService');
 const { paymentOpsIssueService } = require('../services/paymentOpsIssueService');
 const { paypalPayoutService } = require('../services/paypalPayoutService');
+const { providerPayoutService } = require('../services/providerPayoutService');
 const { slipcraftUserService } = require('../services/slipcraftUserService');
+const { stripeConnectedAccountService } = require('../services/stripeConnectedAccountService');
 const { topUpOrderService } = require('../services/topUpOrderService');
 const { AUDIT_ACTOR_TYPE } = require('../utils/constants');
 
 async function approvePayoutController(request, response) {
-  const approval = await paypalPayoutService.approvePayout(request.params.id, request.adminActorId);
+  const payout = await payoutRepository.findByIdentifier(request.params.id);
+  const approval =
+    String(payout?.metadata?.provider || '').toLowerCase() === 'stripe'
+      ? await providerPayoutService.approvePayout(payout.id, request.adminActorId)
+      : await paypalPayoutService.approvePayout(request.params.id, request.adminActorId);
   const result = await dispatchPayoutProcessing(
     approval.payout_id,
     'process-approved-payout',
@@ -66,7 +85,11 @@ async function approvePayoutController(request, response) {
 
 async function rejectPayoutController(request, response) {
   const body = rejectPayoutSchema.parse(request.body || {});
-  const result = await paypalPayoutService.rejectPayout(request.params.id, request.adminActorId, body.reason);
+  const payout = await payoutRepository.findByIdentifier(request.params.id);
+  const result =
+    String(payout?.metadata?.provider || '').toLowerCase() === 'stripe'
+      ? await providerPayoutService.rejectPayout(payout.id, request.adminActorId, body.reason)
+      : await paypalPayoutService.rejectPayout(request.params.id, request.adminActorId, body.reason);
   response.json(result);
 }
 
@@ -94,12 +117,204 @@ async function releaseInvoiceFundsController(request, response) {
   response.json(presentFundRelease(result));
 }
 
+async function refreshAdminInvoiceController(request, response) {
+  const result = await providerInvoiceService.refreshInvoice({
+    invoiceId: request.params.id,
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId
+  });
+
+  response.json(result);
+}
+
+async function voidAdminInvoiceController(request, response) {
+  const result = await providerInvoiceService.cancelInvoice({
+    invoiceId: request.params.id,
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId,
+    requestId: request.id
+  });
+
+  response.json(result);
+}
+
+async function markInvoiceReviewRequiredController(request, response) {
+  const body = markInvoiceReviewRequiredSchema.parse(request.body || {});
+  const result = await providerInvoiceService.markInvoiceReviewRequired({
+    invoiceId: request.params.id,
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId,
+    reason: body.reason
+  });
+
+  response.json(result);
+}
+
 async function listAdminPayoutsController(request, response) {
   const query = listAdminPayoutsQuerySchema.parse(request.query || {});
-  const payouts = await payoutRepository.findMany(query);
+  const pageSize = query.pageSize || query.limit || 50;
+  const filters = {
+    ...query,
+    pageSize,
+    offset: (query.page - 1) * pageSize
+  };
+  const [payouts, total] = await Promise.all([
+    payoutRepository.findMany(filters),
+    payoutRepository.countMany(filters)
+  ]);
   response.json({
-    data: payouts.map(presentAdminPayout)
+    data: payouts.map(presentAdminPayout),
+    pagination: {
+      page: query.page,
+      page_size: pageSize,
+      total,
+      has_next_page: query.page * pageSize < total
+    }
   });
+}
+
+async function listAdminInvoicesController(request, response) {
+  const query = listAdminInvoicesQuerySchema.parse(request.query || {});
+  const pageSize = query.pageSize || query.limit || 50;
+  const filters = {
+    ...query,
+    pageSize,
+    offset: (query.page - 1) * pageSize
+  };
+  const [invoices, total] = await Promise.all([
+    invoiceRepository.findMany(filters),
+    invoiceRepository.countMany(filters)
+  ]);
+  response.json({
+    data: invoices.map(presentAdminInvoice),
+    pagination: {
+      page: query.page,
+      page_size: pageSize,
+      total,
+      has_next_page: query.page * pageSize < total
+    }
+  });
+}
+
+async function listPaymentProvidersController(_request, response) {
+  response.json({
+    data: paymentProviderRegistry.listProviders()
+  });
+}
+
+async function getPaymentProviderController(request, response) {
+  response.json({
+    provider: paymentProviderRegistry.getProviderStatus(request.params.provider)
+  });
+}
+
+async function getPaymentProviderBalanceController(request, response) {
+  const balance = await providerBalanceService.getProviderBalance({
+    provider: request.params.provider,
+    connectedAccountId: request.query?.connectedAccountId,
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId
+  });
+  response.json({
+    balance
+  });
+}
+
+async function listPaymentProviderInvoiceFeaturesController(_request, response) {
+  response.json({
+    data: paymentProviderRegistry.listInvoiceFeatures()
+  });
+}
+
+async function getPaymentProviderInvoiceFeaturesController(request, response) {
+  response.json({
+    provider: paymentProviderRegistry.getProviderInvoiceFeatures(request.params.provider)
+  });
+}
+
+async function listStripeConnectedAccountsController(request, response) {
+  const query = stripeConnectedAccountListQuerySchema.parse(request.query || {});
+  response.json({
+    data: await stripeConnectedAccountService.listConnectedAccounts(query)
+  });
+}
+
+async function createStripeConnectedAccountController(request, response) {
+  const body = stripeConnectedAccountCreateSchema.parse(request.body || {});
+  const account = await stripeConnectedAccountService.createConnectedAccount({
+    ...body,
+    adminActorId: request.adminActorId
+  });
+  response.status(201).json({ account });
+}
+
+async function refreshStripeConnectedAccountController(request, response) {
+  const params = stripeConnectedAccountParamsSchema.parse(request.params || {});
+  const account = await stripeConnectedAccountService.refreshConnectedAccount({
+    id: params.id,
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId
+  });
+  response.json({ account });
+}
+
+async function createStripeConnectedAccountOnboardingLinkController(request, response) {
+  const params = stripeConnectedAccountParamsSchema.parse(request.params || {});
+  const body = stripeAccountLinkCreateSchema.parse(request.body || {});
+  const result = await stripeConnectedAccountService.createOnboardingLink({
+    id: params.id,
+    ...body,
+    adminActorId: request.adminActorId
+  });
+  response.status(201).json(result);
+}
+
+async function addInvoiceNoteController(request, response) {
+  const invoice = await invoiceRepository.findByIdentifier(request.params.id);
+  if (!invoice) {
+    response.status(404).json({
+      code: 'INVOICE_NOT_FOUND',
+      message: 'Invoice not found.'
+    });
+    return;
+  }
+
+  const body = adminRecordNoteSchema.parse(request.body || {});
+  await auditLogService.log({
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId,
+    action: 'invoice.note_added',
+    entityType: 'invoice',
+    entityId: invoice.id,
+    metadata: {
+      note: body.note
+    }
+  });
+  response.status(201).json({ note: body.note });
+}
+
+async function addPayoutNoteController(request, response) {
+  const payout = await payoutRepository.findByIdentifier(request.params.id);
+  if (!payout) {
+    response.status(404).json({
+      code: 'PAYOUT_NOT_FOUND',
+      message: 'Payout not found.'
+    });
+    return;
+  }
+
+  const body = adminRecordNoteSchema.parse(request.body || {});
+  await auditLogService.log({
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId,
+    action: 'payout.note_added',
+    entityType: 'payout',
+    entityId: payout.id,
+    metadata: {
+      note: body.note
+    }
+  });
+  response.status(201).json({ note: body.note });
 }
 
 async function listRiskFlagsController(request, response) {
@@ -384,6 +599,8 @@ module.exports = {
   acknowledgePaymentOpsIssueController,
   adjustAdminUserPointsController,
   approvePayoutController,
+  addInvoiceNoteController,
+  addPayoutNoteController,
   cancelTopUpOrderController,
   cancelUnclaimedPayoutController,
   completeTopUpOrderController,
@@ -398,21 +615,34 @@ module.exports = {
   deleteAdminInvoiceTemplateController,
   deleteAdminTestimonialController,
   rejectPayoutController,
+  refreshAdminInvoiceController,
   releaseInvoiceFundsController,
+  markInvoiceReviewRequiredController,
   listAdminUsersController,
   listTopUpOrdersController,
   listAdminInvoiceTemplatesController,
   listAdminPayoutsController,
+  listAdminInvoicesController,
   listPaymentOpsIssuesController,
   listRiskFlagsController,
   listWebhookEventsController,
   reopenPaymentOpsIssueController,
   resolvePaymentOpsIssueController,
   getQueueOverviewController,
+  getPaymentProviderInvoiceFeaturesController,
+  getPaymentProviderBalanceController,
+  getPaymentProviderController,
   listDeadLetterJobsController,
+  listPaymentProviderInvoiceFeaturesController,
+  listPaymentProvidersController,
+  listStripeConnectedAccountsController,
   runPaymentReconciliationController,
+  createStripeConnectedAccountController,
+  createStripeConnectedAccountOnboardingLinkController,
+  refreshStripeConnectedAccountController,
   updateAdminConfigController,
   updateAdminFaqController,
   updateAdminInvoiceTemplateController,
-  updateAdminTestimonialController
+  updateAdminTestimonialController,
+  voidAdminInvoiceController
 };

@@ -1,5 +1,5 @@
-import React from 'react';
-import { ArrowLeft, ArrowRight, Clock3, ExternalLink, FileText, Layers3, Send, Sparkles, Wallet } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Activity, ArrowLeft, ArrowRight, Clock3, ExternalLink, FileText, Layers3, Send, Sparkles, Wallet } from 'lucide-react';
 import { Link, Navigate, useParams, useSearchParams } from 'react-router-dom';
 import AdminPaymentsTab from '../components/AdminTabs/AdminPaymentsTab';
 import DashboardLayout from '../components/DashboardLayout';
@@ -12,6 +12,537 @@ import {
   getServicePreview,
   getRecommendedPointPacks
 } from '../lib/servicesCatalog';
+import {
+  getPaymentProviderLauncher,
+  normalizePaymentProviderView
+} from '../lib/paymentProviderLaunchers';
+import {
+  createStripeConnectedAccount,
+  createStripeConnectedAccountOnboardingLink,
+  getPaymentProviderBalance,
+  listStripeConnectedAccounts,
+  listPaymentProviderInvoiceFeatures,
+  listPaymentProviders,
+  refreshStripeConnectedAccount
+} from '../lib/api';
+
+const laneIconMap = {
+  'custom-details': Sparkles,
+  invoices: FileText,
+  payouts: Send,
+  'wallet-balance': Wallet,
+  'provider-activity': Activity
+};
+
+function getLaneStatusCopy(lane) {
+  if (lane.status === 'live') {
+    return {
+      label: 'Live',
+      classes: 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    };
+  }
+
+  return {
+    label: 'Setup',
+    classes: 'border-amber-200 bg-amber-50 text-amber-700'
+  };
+}
+
+function getReadinessTone(status) {
+  if (status === 'configured') {
+    return {
+      label: 'Configured',
+      classes: 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    };
+  }
+
+  if (status === 'not_configured') {
+    return {
+      label: 'Not configured',
+      classes: 'border-amber-200 bg-amber-50 text-amber-700'
+    };
+  }
+
+  return {
+    label: 'Static setup',
+    classes: 'border-slate-200 bg-slate-50 text-slate-600'
+  };
+}
+
+function ProviderReadinessPanel({ providerLauncher, providerStatus, invoiceFeatures, loading, error }) {
+  const readiness = getReadinessTone(providerStatus?.status);
+  const missingEnv = providerStatus?.missing_env || [];
+  const requiredEnv = providerStatus?.required_env || [];
+  const invoiceFeature = invoiceFeatures?.invoice_features;
+
+  return (
+    <div className="rounded-[28px] border border-white/70 bg-white p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Provider Readiness</p>
+          <h3 className="mt-3 text-xl font-black tracking-[-0.04em] text-slate-950">{providerLauncher.title}</h3>
+        </div>
+        <div className={`rounded-full border px-3 py-1 text-[11px] font-black uppercase tracking-[0.14em] ${readiness.classes}`}>
+          {loading ? 'Loading' : readiness.label}
+        </div>
+      </div>
+
+      {error ? (
+        <p className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700">{error}</p>
+      ) : null}
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
+          <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Required Env</p>
+          <p className="mt-2 text-lg font-black text-slate-950">{requiredEnv.length || 'None'}</p>
+        </div>
+        <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
+          <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Missing Env</p>
+          <p className="mt-2 text-lg font-black text-slate-950">{missingEnv.length}</p>
+        </div>
+      </div>
+
+      {missingEnv.length ? (
+        <div className="mt-4 rounded-[20px] border border-amber-200 bg-amber-50 px-4 py-4">
+          <p className="text-sm font-black text-slate-950">Set these environment variables before enabling provider operations:</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {missingEnv.map((name) => (
+              <span key={name} className="rounded-full border border-amber-200 bg-white px-3 py-1 text-xs font-black text-amber-800">
+                {name}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {invoiceFeature ? (
+        <div className="mt-4 rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4">
+          <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Invoice Feature</p>
+          <p className="mt-2 text-sm font-black text-slate-950">
+            {invoiceFeature.supported ? invoiceFeature.collection_method : 'Not invoice-capable'}
+          </p>
+          <p className="mt-2 text-xs leading-6 text-slate-600">
+            {invoiceFeature.supported
+              ? `Provider resource: ${invoiceFeature.provider_resource}. Hosted link field: ${invoiceFeature.provider_link_field || 'none'}.`
+              : invoiceFeature.reason}
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function formatProviderMoney(entry) {
+  return `${entry.currency || '---'} ${entry.amount || '0.00'}`;
+}
+
+function ProviderBalancePanel({ balance, loading, error }) {
+  if (loading) {
+    return (
+      <div className="rounded-[28px] border border-white/70 bg-white p-5">
+        <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Wallet Balance</p>
+        <p className="mt-3 text-sm font-bold text-slate-600">Loading provider balance...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-[28px] border border-rose-200 bg-rose-50 p-5">
+        <p className="text-[11px] font-black uppercase tracking-[0.18em] text-rose-500">Wallet Balance</p>
+        <p className="mt-3 text-sm font-bold text-rose-700">{error}</p>
+      </div>
+    );
+  }
+
+  if (!balance) {
+    return null;
+  }
+
+  const available = Array.isArray(balance.available) ? balance.available : [];
+  const pending = Array.isArray(balance.pending) ? balance.pending : [];
+
+  return (
+    <div className="rounded-[28px] border border-white/70 bg-white p-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Wallet Balance</p>
+          <h3 className="mt-3 text-xl font-black tracking-[-0.04em] text-slate-950">Stripe {balance.mode === 'connected_account' ? 'connected account' : 'platform'} balance</h3>
+          <p className="mt-2 text-xs font-bold uppercase tracking-[0.14em] text-slate-400">
+            {balance.livemode ? 'Live mode' : 'Sandbox mode'}{balance.connected_account_id ? ` · ${balance.connected_account_id}` : ''}
+          </p>
+        </div>
+        <div className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-black uppercase tracking-[0.14em] text-emerald-700">
+          Live
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-4 md:grid-cols-2">
+        <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-4">
+          <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Available</p>
+          <div className="mt-3 space-y-2">
+            {available.length ? available.map((entry) => (
+              <div key={`available-${entry.currency}`} className="flex items-center justify-between gap-3 text-sm">
+                <span className="font-black text-slate-950">{entry.currency}</span>
+                <span className="font-bold text-slate-700">{formatProviderMoney(entry)}</span>
+              </div>
+            )) : <p className="text-sm font-bold text-slate-500">No available balances returned.</p>}
+          </div>
+        </div>
+        <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-4">
+          <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Pending</p>
+          <div className="mt-3 space-y-2">
+            {pending.length ? pending.map((entry) => (
+              <div key={`pending-${entry.currency}`} className="flex items-center justify-between gap-3 text-sm">
+                <span className="font-black text-slate-950">{entry.currency}</span>
+                <span className="font-bold text-slate-700">{formatProviderMoney(entry)}</span>
+              </div>
+            )) : <p className="text-sm font-bold text-slate-500">No pending balances returned.</p>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getStripeAccountTone(status) {
+  if (status === 'ready') {
+    return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  }
+
+  if (status === 'restricted') {
+    return 'border-rose-200 bg-rose-50 text-rose-700';
+  }
+
+  if (status === 'pending_review') {
+    return 'border-blue-200 bg-blue-50 text-blue-700';
+  }
+
+  return 'border-amber-200 bg-amber-50 text-amber-700';
+}
+
+function StripeConnectedAccountsPanel({ accent }) {
+  const [accountsState, setAccountsState] = useState({
+    accounts: [],
+    loading: true,
+    error: '',
+    notice: ''
+  });
+  const [form, setForm] = useState({
+    userId: '',
+    stripeAccountId: '',
+    email: '',
+    country: 'US',
+    businessType: 'individual'
+  });
+  const [busyAction, setBusyAction] = useState('');
+
+  const loadAccounts = (notice = '') => {
+    setAccountsState((previous) => ({ ...previous, loading: true, error: '' }));
+    listStripeConnectedAccounts()
+      .then((payload) => {
+        setAccountsState({
+        accounts: Array.isArray(payload?.data) ? payload.data : [],
+        loading: false,
+        error: '',
+        notice
+      });
+      })
+      .catch((error) => {
+        setAccountsState({
+          accounts: [],
+          loading: false,
+          error: error?.message || 'Stripe connected accounts could not be loaded.',
+          notice: ''
+        });
+      });
+  };
+
+  useEffect(() => {
+    loadAccounts();
+  }, []);
+
+  const updateForm = (field, value) => {
+    setForm((previous) => ({
+      ...previous,
+      [field]: value
+    }));
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setBusyAction('create');
+    setAccountsState((previous) => ({ ...previous, error: '', notice: '' }));
+
+    try {
+      await createStripeConnectedAccount({
+        userId: form.userId.trim() || undefined,
+        stripeAccountId: form.stripeAccountId.trim() || undefined,
+        email: form.email.trim() || undefined,
+        country: form.country.trim().toUpperCase() || 'US',
+        businessType: form.businessType || undefined
+      });
+      setForm({
+        userId: '',
+        stripeAccountId: '',
+        email: '',
+        country: 'US',
+        businessType: 'individual'
+      });
+      loadAccounts('Stripe connected account saved.');
+    } catch (error) {
+      setAccountsState((previous) => ({
+        ...previous,
+        error: error?.message || 'Stripe connected account could not be saved.'
+      }));
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const handleRefresh = async (accountId) => {
+    setBusyAction(`refresh:${accountId}`);
+    setAccountsState((previous) => ({ ...previous, error: '', notice: '' }));
+
+    try {
+      await refreshStripeConnectedAccount(accountId);
+      loadAccounts('Connected account refreshed.');
+    } catch (error) {
+      setAccountsState((previous) => ({
+        ...previous,
+        error: error?.message || 'Connected account could not be refreshed.'
+      }));
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const handleOnboarding = async (accountId) => {
+    setBusyAction(`onboarding:${accountId}`);
+    setAccountsState((previous) => ({ ...previous, error: '', notice: '' }));
+
+    try {
+      const payload = await createStripeConnectedAccountOnboardingLink(accountId);
+      const url = payload?.onboarding_link?.url;
+      if (url) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+      loadAccounts('Stripe onboarding link opened.');
+    } catch (error) {
+      setAccountsState((previous) => ({
+        ...previous,
+        error: error?.message || 'Onboarding link could not be created.'
+      }));
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const handleCopyAccountId = async (accountId) => {
+    try {
+      await navigator.clipboard.writeText(accountId);
+      setAccountsState((previous) => ({ ...previous, notice: 'Stripe account id copied for payout receiver.' }));
+    } catch (_error) {
+      setAccountsState((previous) => ({ ...previous, notice: accountId }));
+    }
+  };
+
+  return (
+    <div className="rounded-[28px] border border-white/70 bg-white p-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Connected Accounts</p>
+          <h3 className="mt-3 text-xl font-black tracking-[-0.04em] text-slate-950">Stripe onboarding</h3>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            Create or register a connected account, open Stripe-hosted onboarding, then refresh readiness before payout approval.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={loadAccounts}
+          disabled={accountsState.loading}
+          className="inline-flex items-center justify-center gap-2 rounded-full border px-4 py-2 text-xs font-black uppercase tracking-[0.12em] transition disabled:opacity-60"
+          style={{ borderColor: accent.edge, color: accent.bg }}
+        >
+          <Activity size={14} />
+          Refresh
+        </button>
+      </div>
+
+      {accountsState.error ? (
+        <p className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700">{accountsState.error}</p>
+      ) : null}
+      {accountsState.notice ? (
+        <p className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">{accountsState.notice}</p>
+      ) : null}
+
+      <form onSubmit={handleSubmit} className="mt-5 rounded-[22px] border border-slate-200 bg-slate-50 p-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          <div>
+            <label className="text-xs font-black uppercase tracking-[0.14em] text-slate-400">User ID</label>
+            <input
+              value={form.userId}
+              onChange={(event) => updateForm('userId', event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-slate-400"
+              placeholder="demo-user"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-black uppercase tracking-[0.14em] text-slate-400">Existing Account ID</label>
+            <input
+              value={form.stripeAccountId}
+              onChange={(event) => updateForm('stripeAccountId', event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-slate-400"
+              placeholder="acct_..."
+            />
+          </div>
+          <div>
+            <label className="text-xs font-black uppercase tracking-[0.14em] text-slate-400">Email</label>
+            <input
+              value={form.email}
+              onChange={(event) => updateForm('email', event.target.value)}
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-slate-400"
+              placeholder="recipient@example.com"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-black uppercase tracking-[0.14em] text-slate-400">Country</label>
+              <input
+                value={form.country}
+                onChange={(event) => updateForm('country', event.target.value)}
+                maxLength={2}
+                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-bold uppercase text-slate-900 outline-none focus:border-slate-400"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-black uppercase tracking-[0.14em] text-slate-400">Type</label>
+              <select
+                value={form.businessType}
+                onChange={(event) => updateForm('businessType', event.target.value)}
+                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-slate-400"
+              >
+                <option value="individual">Individual</option>
+                <option value="company">Company</option>
+                <option value="non_profit">Non-profit</option>
+                <option value="government_entity">Government</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <button
+          type="submit"
+          disabled={busyAction === 'create'}
+          className="mt-4 inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-xs font-black uppercase tracking-[0.12em] text-white transition disabled:opacity-60"
+          style={{ backgroundColor: accent.bg }}
+        >
+          <Sparkles size={14} />
+          {form.stripeAccountId.trim() ? 'Register Account' : 'Create Account'}
+        </button>
+      </form>
+
+      <div className="mt-5 space-y-3">
+        {accountsState.loading ? (
+          <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4 text-sm font-bold text-slate-600">
+            Loading connected accounts...
+          </div>
+        ) : null}
+        {!accountsState.loading && !accountsState.accounts.length ? (
+          <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4 text-sm font-bold text-slate-600">
+            No Stripe connected accounts are tracked yet.
+          </div>
+        ) : null}
+        {accountsState.accounts.map((account) => {
+          const currentlyDue = Array.isArray(account.requirements?.currently_due)
+            ? account.requirements.currently_due
+            : [];
+          const pastDue = Array.isArray(account.requirements?.past_due)
+            ? account.requirements.past_due
+            : [];
+          return (
+            <div key={account.id} className="rounded-[22px] border border-slate-200 bg-white p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="break-all text-sm font-black text-slate-950">{account.stripe_account_id}</p>
+                    <span className={`rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] ${getStripeAccountTone(account.status)}`}>
+                      {account.status}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs font-bold text-slate-500">
+                    {account.email || 'No email'} · {account.country_code || '--'} · {account.business_type || 'unknown'}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleCopyAccountId(account.stripe_account_id)}
+                    className="rounded-full border border-slate-200 px-3 py-1.5 text-xs font-black text-slate-700 transition hover:border-slate-400"
+                  >
+                    Copy ID
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRefresh(account.id)}
+                    disabled={busyAction === `refresh:${account.id}`}
+                    className="rounded-full border border-slate-200 px-3 py-1.5 text-xs font-black text-slate-700 transition hover:border-slate-400 disabled:opacity-60"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOnboarding(account.id)}
+                    disabled={busyAction === `onboarding:${account.id}`}
+                    className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-black text-white transition disabled:opacity-60"
+                    style={{ backgroundColor: accent.bg }}
+                  >
+                    <ExternalLink size={13} />
+                    Onboard
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-[16px] border border-slate-200 bg-slate-50 px-3 py-3">
+                  <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Charges</p>
+                  <p className="mt-1 text-sm font-black text-slate-950">{account.charges_enabled ? 'Enabled' : 'Disabled'}</p>
+                </div>
+                <div className="rounded-[16px] border border-slate-200 bg-slate-50 px-3 py-3">
+                  <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Payouts</p>
+                  <p className="mt-1 text-sm font-black text-slate-950">{account.payouts_enabled ? 'Enabled' : 'Disabled'}</p>
+                </div>
+                <div className="rounded-[16px] border border-slate-200 bg-slate-50 px-3 py-3">
+                  <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Details</p>
+                  <p className="mt-1 text-sm font-black text-slate-950">{account.details_submitted ? 'Submitted' : 'Needed'}</p>
+                </div>
+              </div>
+
+              {account.disabled_reason || currentlyDue.length || pastDue.length ? (
+                <div className="mt-4 rounded-[18px] border border-amber-200 bg-amber-50 px-4 py-3">
+                  <p className="text-xs font-black uppercase tracking-[0.14em] text-amber-700">Requirements</p>
+                  {account.disabled_reason ? (
+                    <p className="mt-2 text-sm font-bold text-amber-900">{account.disabled_reason}</p>
+                  ) : null}
+                  <p className="mt-2 text-xs leading-6 text-amber-900">
+                    {[...pastDue, ...currentlyDue].length ? [...pastDue, ...currentlyDue].join(', ') : 'No current requirements.'}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function shouldDisableLaneForReadiness(lane, providerStatus, isAdmin) {
+  if (!lane || !providerStatus || !isAdmin) {
+    return false;
+  }
+
+  return false;
+}
 
 export default function ServiceDetailPage() {
   const { slug } = useParams();
@@ -19,6 +550,98 @@ export default function ServiceDetailPage() {
   const { config, profile, user } = useAppContext();
   const service = getServiceBySlug(slug || '');
   const points = Number(profile?.points || 0);
+  const providerLauncher = getPaymentProviderLauncher(slug || '');
+  const officialView = searchParams.get('view');
+  const providerView = normalizePaymentProviderView(officialView);
+  const activeProviderLane = providerLauncher?.lanes.find((lane) => lane.id === providerView);
+  const [providerRegistryState, setProviderRegistryState] = useState({
+    providers: [],
+    invoiceFeatures: [],
+    loading: false,
+    error: ''
+  });
+  const [providerBalanceState, setProviderBalanceState] = useState({
+    balance: null,
+    loading: false,
+    error: ''
+  });
+
+  useEffect(() => {
+    if (!providerLauncher || !user?.isAdmin) {
+      setProviderRegistryState((previous) => ({
+        ...previous,
+        providers: [],
+        invoiceFeatures: [],
+        loading: false,
+        error: ''
+      }));
+      return undefined;
+    }
+
+    let cancelled = false;
+    setProviderRegistryState((previous) => ({ ...previous, loading: true, error: '' }));
+
+    Promise.all([
+      listPaymentProviders(),
+      listPaymentProviderInvoiceFeatures()
+    ])
+      .then(([providerPayload, invoiceFeaturePayload]) => {
+        if (cancelled) {
+          return;
+        }
+
+        setProviderRegistryState({
+          providers: Array.isArray(providerPayload?.data) ? providerPayload.data : [],
+          invoiceFeatures: Array.isArray(invoiceFeaturePayload?.data) ? invoiceFeaturePayload.data : [],
+          loading: false,
+          error: ''
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setProviderRegistryState({
+          providers: [],
+          invoiceFeatures: [],
+          loading: false,
+          error: error?.message || 'Provider readiness could not be loaded.'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [providerLauncher, user?.isAdmin]);
+
+  useEffect(() => {
+    if (!providerLauncher || !user?.isAdmin || activeProviderLane?.id !== 'wallet-balance' || activeProviderLane.status !== 'live') {
+      setProviderBalanceState({ balance: null, loading: false, error: '' });
+      return undefined;
+    }
+
+    let cancelled = false;
+    setProviderBalanceState({ balance: null, loading: true, error: '' });
+
+    getPaymentProviderBalance(providerLauncher.key)
+      .then((payload) => {
+        if (cancelled) return;
+        setProviderBalanceState({ balance: payload?.balance || null, loading: false, error: '' });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setProviderBalanceState({
+          balance: null,
+          loading: false,
+          error: error?.message || 'Provider balance could not be loaded.'
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProviderLane?.id, activeProviderLane?.status, providerLauncher, user?.isAdmin]);
 
   if (!service) {
     return <Navigate to="/services" replace />;
@@ -33,9 +656,350 @@ export default function ServiceDetailPage() {
   const isFlashEmailService = service.category === 'Flash Emails';
   const isBankSlipService = service.category === 'Bank Slips';
   const isPayPalService = service.slug === 'paypal';
-  const officialView = searchParams.get('view');
   const isOfficialInvoiceView = isPayPalService && officialView === 'official-invoicing';
   const isOfficialPayoutView = isPayPalService && officialView === 'official-payouts';
+  const providerStatus = providerRegistryState.providers.find((entry) => entry.key === providerLauncher?.key) || null;
+  const providerInvoiceFeatures =
+    providerRegistryState.invoiceFeatures.find((entry) => entry.provider?.key === providerLauncher?.key) || null;
+
+  if (providerLauncher) {
+    const providerBackLabel = `Back to ${providerLauncher.title} Launcher`;
+    const providerShellStyle = {
+      background: `linear-gradient(135deg, ${providerLauncher.accent.soft} 0%, #ffffff 58%, ${providerLauncher.accent.soft} 100%)`,
+      borderColor: providerLauncher.accent.edge
+    };
+
+    if (activeProviderLane) {
+      const LaneIcon = laneIconMap[activeProviderLane.id] || Layers3;
+      const laneStatus = getLaneStatusCopy(activeProviderLane);
+      const isLiveProviderInvoice =
+        ['paypal', 'stripe', 'crypto'].includes(providerLauncher.key) && activeProviderLane.id === 'invoices';
+      const isLivePayPalPayout = providerLauncher.key === 'paypal' && activeProviderLane.id === 'payouts';
+      const isLiveStripePayout = providerLauncher.key === 'stripe' && activeProviderLane.id === 'payouts';
+      const requiresAdmin = Boolean(activeProviderLane.adminOnly);
+      const isSetupLaneDisabled = shouldDisableLaneForReadiness(activeProviderLane, providerStatus, user?.isAdmin);
+
+      if (isLivePayPalPayout && user?.isAdmin) {
+        return (
+          <div className="min-h-screen bg-[#f5f7fa] px-4 py-6 md:px-8">
+            <div className="mx-auto max-w-[1180px]">
+              <Link
+                to={`/services/${service.slug}`}
+                className="mb-4 inline-flex items-center gap-2 rounded-full border bg-white px-4 py-2 text-sm font-black transition"
+                style={{ borderColor: providerLauncher.accent.edge, color: providerLauncher.accent.bg }}
+              >
+                <ArrowLeft size={16} />
+                {providerBackLabel}
+              </Link>
+              <AdminPaymentsTab mode="payout" embedded />
+            </div>
+          </div>
+        );
+      }
+
+      if (isLiveStripePayout && user?.isAdmin) {
+        return (
+          <div className="min-h-screen bg-[#f5f7fa] px-4 py-6 md:px-8">
+            <div className="mx-auto max-w-[1180px]">
+              <Link
+                to={`/services/${service.slug}`}
+                className="mb-4 inline-flex items-center gap-2 rounded-full border bg-white px-4 py-2 text-sm font-black transition"
+                style={{ borderColor: providerLauncher.accent.edge, color: providerLauncher.accent.bg }}
+              >
+                <ArrowLeft size={16} />
+                {providerBackLabel}
+              </Link>
+              <AdminPaymentsTab mode="payout" embedded providerFilter="stripe" />
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <DashboardLayout>
+          <div className="mx-auto max-w-6xl px-4 py-8 md:px-8">
+            <div className="rounded-[32px] border bg-white p-6 shadow-[0_20px_60px_rgba(15,23,42,0.06)] md:p-8" style={providerShellStyle}>
+              <Link
+                to={`/services/${service.slug}`}
+                className="inline-flex items-center gap-2 text-sm font-black transition hover:opacity-75"
+                style={{ color: providerLauncher.accent.bg }}
+              >
+                <ArrowLeft size={16} />
+                {providerBackLabel}
+              </Link>
+
+              <div className="mt-7 flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+                <div className="max-w-3xl">
+                  <div className="flex items-center gap-4">
+                    <ServiceLogo service={service} size="lg" />
+                    <div
+                      className="inline-flex rounded-full border bg-white px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.18em]"
+                      style={{ borderColor: providerLauncher.accent.edge, color: providerLauncher.accent.bg }}
+                    >
+                      {providerLauncher.title} Sub-Page
+                    </div>
+                  </div>
+                  <h1 className="mt-5 text-3xl font-black tracking-[-0.05em] text-slate-950 md:text-5xl">{activeProviderLane.title}</h1>
+                  <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600 md:text-base">{activeProviderLane.subtitle}</p>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2 lg:w-[320px] lg:grid-cols-1">
+                  <div className="rounded-[22px] border border-white/70 bg-white p-4">
+                    <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Provider</p>
+                    <p className="mt-3 text-lg font-black tracking-[-0.03em] text-slate-950">{providerLauncher.title}</p>
+                  </div>
+                  <div className={`rounded-[22px] border px-4 py-4 text-sm font-black ${laneStatus.classes}`}>
+                    {laneStatus.label}
+                  </div>
+                  {user?.isAdmin ? (
+                    <div className={`rounded-[22px] border px-4 py-4 text-sm font-black ${getReadinessTone(providerStatus?.status).classes}`}>
+                      {providerRegistryState.loading ? 'Loading readiness' : getReadinessTone(providerStatus?.status).label}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="mt-8 grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
+                <section className="rounded-[28px] border border-white/70 bg-white p-5 shadow-[0_16px_40px_rgba(15,23,42,0.04)] md:p-6">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="inline-flex h-11 w-11 items-center justify-center rounded-2xl text-white"
+                      style={{ backgroundColor: providerLauncher.accent.bg, color: providerLauncher.accent.fg }}
+                    >
+                      <LaneIcon size={20} />
+                    </div>
+                    <div>
+                      <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Workspace Lane</p>
+                      <h2 className="text-2xl font-black tracking-[-0.04em] text-slate-950">{activeProviderLane.title}</h2>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 grid gap-3 md:grid-cols-3">
+                    {activeProviderLane.bullets.map((bullet) => (
+                      <div key={bullet} className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4 text-sm font-bold leading-6 text-slate-700">
+                        {bullet}
+                      </div>
+                    ))}
+                  </div>
+
+                  {activeProviderLane.kind === 'custom' ? (
+                    <Link
+                      to={activeProviderLane.to}
+                      className="mt-6 inline-flex items-center justify-center gap-2 rounded-full px-5 py-3 text-sm font-black text-white transition hover:opacity-90"
+                      style={{ backgroundColor: providerLauncher.accent.bg, color: providerLauncher.accent.fg }}
+                    >
+                      {activeProviderLane.ctaLabel}
+                      <ArrowRight size={16} />
+                    </Link>
+                  ) : null}
+
+                  {requiresAdmin && !user?.isAdmin ? (
+                    <div className="mt-6 rounded-[24px] border border-amber-200 bg-amber-50 px-5 py-4">
+                      <div className="flex items-start gap-3">
+                        <Clock3 size={18} className="mt-0.5 text-amber-700" />
+                        <div>
+                          <p className="text-sm font-black text-slate-950">Admin access is required for this provider lane.</p>
+                          <p className="mt-2 text-xs leading-6 text-slate-600">
+                            This lane controls provider operations, state refresh, webhooks, settlement, or wallet readiness.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {activeProviderLane.status !== 'live' && (!requiresAdmin || user?.isAdmin) ? (
+                    <div className="mt-6 rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-4">
+                      <p className="text-sm font-black text-slate-950">
+                        {isSetupLaneDisabled
+                          ? 'This provider lane is disabled until required environment variables are configured.'
+                          : 'This provider lane is registered, but live operations are still disabled.'}
+                      </p>
+                      <p className="mt-2 text-xs leading-6 text-slate-600">
+                        The backend adapter registry already describes this lane. The next implementation step is the signed provider client, webhook verifier, idempotency rules, ledger mapping, and sandbox smoke test.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {activeProviderLane.kind === 'balance' && activeProviderLane.status === 'live' && user?.isAdmin ? (
+                    <div className="mt-6">
+                      <ProviderBalancePanel
+                        balance={providerBalanceState.balance}
+                        loading={providerBalanceState.loading}
+                        error={providerBalanceState.error}
+                      />
+                    </div>
+                  ) : null}
+                </section>
+
+                <aside className="space-y-4">
+                  {user?.isAdmin ? (
+                    <ProviderReadinessPanel
+                      providerLauncher={providerLauncher}
+                      providerStatus={providerStatus}
+                      invoiceFeatures={providerInvoiceFeatures}
+                      loading={providerRegistryState.loading}
+                      error={providerRegistryState.error}
+                    />
+                  ) : null}
+                  {user?.isAdmin && providerLauncher.key === 'stripe' ? (
+                    <StripeConnectedAccountsPanel accent={providerLauncher.accent} />
+                  ) : null}
+                  <div className="rounded-[28px] border border-white/70 bg-white p-5">
+                    <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Provider Group</p>
+                    <h3 className="mt-3 text-xl font-black tracking-[-0.04em] text-slate-950">{providerLauncher.title}</h3>
+                    <p className="mt-3 text-sm leading-7 text-slate-600">{providerLauncher.description}</p>
+                  </div>
+                  <div className="rounded-[28px] border border-white/70 bg-white p-5">
+                    <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Other Sub-Pages</p>
+                    <div className="mt-4 space-y-2">
+                      {providerLauncher.lanes
+                        .filter((lane) => lane.id !== activeProviderLane.id)
+                        .map((lane) => (
+                          <Link
+                            key={lane.id}
+                            to={`/services/${service.slug}?view=${lane.id}`}
+                            className="flex items-center justify-between rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black text-slate-800 transition hover:border-slate-300"
+                          >
+                            {lane.title}
+                            <ArrowRight size={15} />
+                          </Link>
+                        ))}
+                    </div>
+                  </div>
+                </aside>
+              </div>
+
+              {isLiveProviderInvoice && user?.isAdmin ? (
+                <div className="mt-8">
+                  <AdminPaymentsTab mode="invoice" embedded providerFilter={providerLauncher.key} />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </DashboardLayout>
+      );
+    }
+
+    return (
+      <DashboardLayout>
+        <div className="mx-auto max-w-6xl px-4 py-8 md:px-8">
+          <div className="rounded-[32px] border bg-white p-6 shadow-[0_20px_60px_rgba(15,23,42,0.06)] md:p-8" style={providerShellStyle}>
+            <Link to="/services" className="inline-flex items-center gap-2 text-sm font-black text-slate-600 transition hover:text-slate-950">
+              <ArrowLeft size={16} />
+              Back to Services
+            </Link>
+
+            <div className="mt-7 flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+              <div className="max-w-3xl">
+                <div className="flex items-center gap-4">
+                  <ServiceLogo service={service} size="lg" />
+                  <div
+                    className="inline-flex rounded-full border bg-white px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.18em]"
+                    style={{ borderColor: providerLauncher.accent.edge, color: providerLauncher.accent.bg }}
+                  >
+                    {providerLauncher.eyebrow}
+                  </div>
+                </div>
+                <h1 className="mt-5 text-3xl font-black tracking-[-0.05em] text-slate-950 md:text-5xl">
+                  {providerLauncher.title} Launcher
+                </h1>
+                <p className="mt-4 max-w-3xl text-sm leading-7 text-slate-600 md:text-base">{providerLauncher.description}</p>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2 lg:w-[320px] lg:grid-cols-1">
+                <div className="rounded-[22px] border border-white/70 bg-white p-4">
+                  <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Current balance</p>
+                  <p className="mt-3 text-2xl font-black tracking-[-0.05em] text-slate-950">{points.toLocaleString()} pts</p>
+                </div>
+                <div className="rounded-[22px] border border-white/70 bg-white p-4">
+                  <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Provider status</p>
+                  <p className="mt-3 text-lg font-black tracking-[-0.03em] text-slate-950">
+                    {user?.isAdmin && providerStatus
+                      ? getReadinessTone(providerStatus.status).label
+                      : providerLauncher.statusLabel}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {providerLauncher.lanes.map((lane) => {
+                const LaneIcon = laneIconMap[lane.id] || Layers3;
+                const laneStatus = getLaneStatusCopy(lane);
+                const disabledForReadiness = shouldDisableLaneForReadiness(lane, providerStatus, user?.isAdmin);
+                const cardClassName = `rounded-[26px] border border-white/70 bg-white px-5 py-5 text-left shadow-[0_14px_34px_rgba(15,23,42,0.04)] transition ${
+                  disabledForReadiness
+                    ? 'cursor-not-allowed opacity-65'
+                    : 'hover:-translate-y-0.5 hover:shadow-[0_18px_42px_rgba(15,23,42,0.08)]'
+                }`;
+                const cardContent = (
+                  <>
+                    <div className="flex items-start justify-between gap-4">
+                      <div
+                        className="inline-flex h-11 w-11 items-center justify-center rounded-2xl text-white"
+                        style={{ backgroundColor: providerLauncher.accent.bg, color: providerLauncher.accent.fg }}
+                      >
+                        <LaneIcon size={19} />
+                      </div>
+                      <div className={`rounded-full border px-3 py-1 text-[11px] font-black uppercase tracking-[0.14em] ${disabledForReadiness ? 'border-slate-200 bg-slate-100 text-slate-500' : laneStatus.classes}`}>
+                        {disabledForReadiness ? 'Env needed' : laneStatus.label}
+                      </div>
+                    </div>
+                    <h2 className="mt-5 text-xl font-black tracking-[-0.04em] text-slate-950">{lane.title}</h2>
+                    <p className="mt-2 text-sm leading-7 text-slate-600">{lane.subtitle}</p>
+                    <div className="mt-5 inline-flex items-center gap-2 text-sm font-black" style={{ color: disabledForReadiness ? '#64748b' : providerLauncher.accent.bg }}>
+                      {disabledForReadiness ? 'Configure env first' : 'Open sub-page'}
+                      <ArrowRight size={16} />
+                    </div>
+                  </>
+                );
+
+                return disabledForReadiness ? (
+                  <div key={lane.id} className={cardClassName}>
+                    {cardContent}
+                  </div>
+                ) : (
+                  <Link
+                    key={lane.id}
+                    to={`/services/${service.slug}?view=${lane.id}`}
+                    className={cardClassName}
+                  >
+                    {cardContent}
+                  </Link>
+                );
+              })}
+            </div>
+
+            {user?.isAdmin ? (
+              <div className="mt-8 space-y-6">
+                <ProviderReadinessPanel
+                  providerLauncher={providerLauncher}
+                  providerStatus={providerStatus}
+                  invoiceFeatures={providerInvoiceFeatures}
+                  loading={providerRegistryState.loading}
+                  error={providerRegistryState.error}
+                />
+                {providerLauncher.key === 'stripe' ? (
+                  <StripeConnectedAccountsPanel accent={providerLauncher.accent} />
+                ) : null}
+              </div>
+            ) : null}
+
+            <div className="mt-8 rounded-[28px] border border-white/70 bg-white p-5">
+              <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Provider Capabilities</p>
+              <div className="mt-4 grid gap-3 md:grid-cols-4">
+                {providerLauncher.capabilities.map((capability) => (
+                  <div key={capability} className="rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold text-slate-700">
+                    {capability}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   if (isFlashEmailService) {
     const launchOptions = [
@@ -67,7 +1031,44 @@ export default function ServiceDetailPage() {
         ]
       : [];
 
-    if (isOfficialInvoiceView || isOfficialPayoutView) {
+    if (isOfficialPayoutView) {
+      return (
+        <div className="min-h-screen bg-[#f5f7fa] px-4 py-6 md:px-8">
+          <div className="mx-auto max-w-[1180px]">
+            <Link
+              to={`/services/${service.slug}`}
+              className="mb-4 inline-flex items-center gap-2 rounded-full border border-[#c7d6f1] bg-white px-4 py-2 text-sm font-black text-[#003087] transition hover:border-[#003087]"
+            >
+              <ArrowLeft size={16} />
+              Back to PayPal Launcher
+            </Link>
+            {user?.isAdmin ? (
+              <AdminPaymentsTab mode="payout" embedded />
+            ) : (
+              <div className="rounded-[28px] border border-[#d7e3f9] bg-white p-6 text-left shadow-[0_20px_60px_rgba(0,48,135,0.08)]">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.18em] text-[#003087]">
+                      <Layers3 size={14} />
+                      Workspace Locked
+                    </div>
+                    <h1 className="mt-3 text-2xl font-black tracking-[-0.04em] text-slate-950">
+                      Admin access is required for the official PayPal payout workspace.
+                    </h1>
+                    <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-600">
+                      This payout surface controls canonical PayPal provider-state remediation, payout review, and funding release.
+                    </p>
+                  </div>
+                  <Clock3 size={18} className="mt-1 text-slate-400" />
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    if (isOfficialInvoiceView) {
       const viewTitle = isOfficialInvoiceView ? 'Official PayPal Invoicing' : 'Official PayPal Payouts';
       const viewSubtitle = isOfficialInvoiceView
         ? 'Launch the hosted PayPal invoice stack from a dedicated PayPal sub-launcher.'

@@ -2,7 +2,7 @@ const axios = require('axios');
 const config = require('../config');
 
 const DEFAULT_TIMEOUT_MS = 12000;
-const ADMIN_HEADER = 'x-admin-token';
+const ADMIN_HEADER = 'Authorization';
 const ADMIN_ORIGINS = new Set();
 try {
   if (config.apiUrl) {
@@ -79,7 +79,7 @@ function shouldAttachAdmin(url) {
 function withAdminHeader(headers = {}, enableAdmin = true) {
   const merged = { ...headers };
   if (enableAdmin && config.admin?.apiToken && !merged[ADMIN_HEADER]) {
-    merged[ADMIN_HEADER] = config.admin.apiToken;
+    merged[ADMIN_HEADER] = `Bearer ${config.admin.apiToken}`;
   }
   return merged;
 }

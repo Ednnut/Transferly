@@ -8,6 +8,17 @@ const paypalWebhookHeadersSchema = z.object({
   'paypal-transmission-time': z.string().min(1)
 });
 
+const stripeWebhookHeadersSchema = z.object({
+  'stripe-signature': z.string().min(1)
+});
+
+const cryptoWebhookHeadersSchema = z.object({
+  'x-hook0-signature': z.string().min(1),
+  'x-hook0-id': z.string().min(1).optional()
+});
+
 module.exports = {
-  paypalWebhookHeadersSchema
+  paypalWebhookHeadersSchema,
+  stripeWebhookHeadersSchema,
+  cryptoWebhookHeadersSchema
 };

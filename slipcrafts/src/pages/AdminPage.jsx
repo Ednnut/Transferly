@@ -8,7 +8,7 @@ const AdminSettingsTab = lazy(() => import('../components/AdminTabs/AdminSetting
 const AdminTestimonialsTab = lazy(() => import('../components/AdminTabs/AdminTestimonialsTab'));
 const AdminFAQTab = lazy(() => import('../components/AdminTabs/AdminFAQTab'));
 const AdminContentTab = lazy(() => import('../components/AdminTabs/AdminContentTab'));
-const AdminPaymentsTab = lazy(() => import('../components/AdminTabs/AdminPaymentsTab'));
+const AdminPaymentsTab = lazy(() => import('../components/AdminTabs/PaymentsTab'));
 const AdminUsersTab = lazy(() => import('../components/AdminTabs/AdminUsersTab'));
 
 function AdminTabFallback() {

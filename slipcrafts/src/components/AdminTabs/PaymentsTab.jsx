@@ -1,34 +1,30 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import {
   Activity,
   AlertTriangle,
   CheckCircle2,
   Clock3,
-  Eye,
-  ExternalLink,
   FileText,
-  MessageSquare,
   Plus,
   QrCode,
-  RefreshCw,
   RotateCcw,
-  ShieldX,
   Send,
   Trash2,
-  Wallet,
-  X
+  Wallet
 } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useAppContext } from '../../context/AppContext';
 import { listStripeConnectedAccounts } from '../../lib/api';
-import PayPalSandboxPayoutChrome from './AdminPaymentsTab.paypalSandbox';
+import InvoiceComposerSection from './InvoiceComposer';
+import { InvoiceFilters, PayoutFilters } from './PaymentFilters';
+import { FundingOrdersPanel, PaymentIssuesPanel, WorkspaceControls } from './PaymentOpsPanels';
+import PayPalSandboxPayoutChrome from './PayPalSandbox';
 import {
   BUILT_IN_INVOICE_SAVED_VIEWS,
   BUILT_IN_PAYOUT_SAVED_VIEWS,
   PAYPAL_BRAND,
   buildReminderDrafts,
-  calculateLineItemSubtotalCents,
   calculateLineItemsTotalCents,
   createEmptyInvoiceComposer,
   createEmptyLineItem,
@@ -39,24 +35,20 @@ import {
   getInitialPageParam,
   getInitialSearchParam,
   getPayoutPricingPreview,
-  getTopUpOrderTone,
   getWalletAvailableCents,
   getWalletBucketCents,
   parseMoneyToCents,
   readSavedViewsForType,
   setSearchParamIfChanged,
   writeSavedViewsForType
-} from './AdminPaymentsTab.utils';
+} from './paymentsUtils';
 import {
-  DetailRow,
-  InvoiceActions,
-  PaginationControls,
+  InvoiceRecordsTable,
   PaymentRecordDrawer,
   PayoutComposerSection,
-  PayoutActions,
-  StatusPill,
-  TimelinePanel
-} from './AdminPaymentsTab.components';
+  PayoutRecordsTable,
+  StatusPill
+} from './PaymentsParts';
 
 export default function AdminPaymentsTab({ mode = 'all', embedded = false, providerFilter = '' }) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -1590,391 +1582,53 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false, provi
       ) : null}
 
       {renderWorkspaceControls ? (
-      <div
-        className="rounded-2xl border bg-white p-6 shadow-sm"
-        style={isPayPalEmbeddedWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
-      >
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <h3
-              className="text-xl font-bold"
-              style={{ color: isPayPalEmbeddedWorkspace ? PAYPAL_BRAND.ink : undefined }}
-            >
-              {workspaceTitle}
-            </h3>
-            <p className="mt-1 text-sm text-gray-500">{workspaceDescription}</p>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <button
-              onClick={() =>
-                Promise.all([
-                  fetchInvoices(),
-                  fetchPayouts(payoutQuery),
-                  fetchAdminTopUpOrders(),
-                  fetchInvoiceReminderConfigurations(),
-                  fetchInvoiceTemplates(),
-                  fetchPaymentIssues()
-                ]).then(() => toast.success('Payments refreshed'))
-              }
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-            >
-              <RefreshCw size={16} />
-              Refresh Lists
-            </button>
-            <button
-              onClick={handleRefreshAll}
-              disabled={busyAction === 'reconciliation'}
-              className="inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-              style={{ backgroundColor: isPayPalEmbeddedWorkspace ? PAYPAL_BRAND.blue : brand }}
-            >
-              <RotateCcw size={16} className={busyAction === 'reconciliation' ? 'animate-spin' : ''} />
-              Run Reconciliation
-            </button>
-          </div>
-        </div>
-
-        <div
-          className="mt-5 rounded-2xl border p-4"
-          style={{
-            borderColor: PAYPAL_BRAND.border,
-            background: isPayPalEmbeddedWorkspace
-              ? `linear-gradient(135deg, rgba(0,48,135,0.10), rgba(255,255,255,1))`
-              : 'linear-gradient(135deg,rgba(0,48,135,0.08),rgba(255,255,255,1))'
-          }}
-        >
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="text-xs font-black uppercase tracking-[0.18em]" style={{ color: PAYPAL_BRAND.blue }}>
-                Official {providerFilter === 'stripe' ? 'Stripe' : providerFilter === 'crypto' ? 'Crypto' : 'PayPal'} Workflow
-              </p>
-              <p className="mt-1 text-sm text-slate-600">
-                {isStripePayoutWorkspace
-                  ? 'Select a connected account, preview transfer readiness, request approval, and process Stripe payouts from this operational surface.'
-                  : isPayPalPayoutWorkspace
-                    ? 'Request, review, refresh, and remediate payouts from the same PayPal-branded operational surface.'
-                  : isPayPalInvoiceWorkspace
-                    ? 'Create, send, remind, sync, and manage official invoices from the same PayPal-branded operational surface.'
-                  : 'Deep-link into the exact operational surface you need instead of scanning the entire admin panel.'}
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {sectionLinks.map(({ id, label, icon: Icon }) => {
-                const selected = activeSection === id;
-                return (
-                  <button
-                    key={id}
-                    onClick={() => handleSectionJump(id)}
-                    className={`inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-bold transition ${
-                      selected
-                        ? 'text-white'
-                        : 'bg-white text-slate-700'
-                    }`}
-                    style={
-                      selected
-                        ? {
-                            borderColor: PAYPAL_BRAND.blue,
-                            backgroundColor: PAYPAL_BRAND.blue
-                          }
-                        : {
-                            borderColor: PAYPAL_BRAND.border,
-                            color: isPayPalEmbeddedWorkspace ? PAYPAL_BRAND.ink : undefined
-                          }
-                    }
-                  >
-                    <Icon size={14} />
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      </div>
+        <WorkspaceControls
+          activeSection={activeSection}
+          brand={brand}
+          busyAction={busyAction}
+          fetchAdminTopUpOrders={fetchAdminTopUpOrders}
+          fetchInvoiceReminderConfigurations={fetchInvoiceReminderConfigurations}
+          fetchInvoiceTemplates={fetchInvoiceTemplates}
+          fetchInvoices={fetchInvoices}
+          fetchPaymentIssues={fetchPaymentIssues}
+          fetchPayouts={fetchPayouts}
+          isPayPalEmbeddedWorkspace={isPayPalEmbeddedWorkspace}
+          isPayPalInvoiceWorkspace={isPayPalInvoiceWorkspace}
+          isPayPalPayoutWorkspace={isPayPalPayoutWorkspace}
+          isStripePayoutWorkspace={isStripePayoutWorkspace}
+          onRefreshAll={handleRefreshAll}
+          onSectionJump={handleSectionJump}
+          payoutQuery={payoutQuery}
+          providerFilter={providerFilter}
+          sectionLinks={sectionLinks}
+          toast={toast}
+          workspaceDescription={workspaceDescription}
+          workspaceTitle={workspaceTitle}
+        />
       ) : null}
 
       {showInvoiceComposer ? (
-        <div ref={registerSectionRef('payout-composer')} className="grid scroll-mt-28 grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
-          <div
-            className="rounded-2xl border bg-white p-6 shadow-sm"
-            style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border, boxShadow: '0 20px 44px rgba(0,48,135,0.06)' } : undefined}
-          >
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <h3 className="text-xl font-bold" style={{ color: isPayPalInvoiceWorkspace ? PAYPAL_BRAND.ink : undefined }}>
-                  Quick Create Official Invoice
-                </h3>
-                <p className="mt-1 text-sm text-gray-500">
-                  Create and send a real PayPal invoice from this workspace using a saved template or manual line items.
-                </p>
-              </div>
-              <button
-                onClick={resetInvoiceComposer}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
-              >
-                Reset
-              </button>
-            </div>
-
-            <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Recipient Email</label>
-                <input
-                  type="email"
-                  value={invoiceComposer.recipientEmail}
-                  onChange={(event) => handleInvoiceComposerFieldChange('recipientEmail', event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                  placeholder="buyer@example.com"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Template</label>
-                <select
-                  value={invoiceComposer.templateId}
-                  onChange={(event) => handleInvoiceComposerFieldChange('templateId', event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                >
-                  <option value="">No template</option>
-                  {invoiceTemplates.map((template) => (
-                    <option key={template.id} value={template.id}>
-                      {template.name} · {template.currency_code}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Issue Date</label>
-                <input
-                  type="date"
-                  value={invoiceComposer.issueDate}
-                  onChange={(event) => handleInvoiceComposerFieldChange('issueDate', event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Due Date</label>
-                <input
-                  type="date"
-                  value={invoiceComposer.dueDate}
-                  onChange={(event) => handleInvoiceComposerFieldChange('dueDate', event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                />
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <label className="mb-1 block text-sm font-medium text-gray-700">Description</label>
-              <textarea
-                value={invoiceComposer.description}
-                onChange={(event) => handleInvoiceComposerFieldChange('description', event.target.value)}
-                rows={3}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                placeholder="Optional note that appears on the official invoice."
-              />
-            </div>
-
-            {selectedInvoiceTemplate ? (
-              <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-bold text-gray-900">{selectedInvoiceTemplate.name}</p>
-                    <p className="mt-1 text-xs text-gray-600">
-                      {selectedInvoiceTemplate.description || 'Template-backed PayPal invoice'}
-                    </p>
-                  </div>
-                  <StatusPill
-                    value={selectedInvoiceTemplate.is_active ? 'ACTIVE' : 'INACTIVE'}
-                    tone={selectedInvoiceTemplate.is_active ? 'green' : 'gray'}
-                  />
-                </div>
-                <div className="mt-3 text-xs text-gray-600">
-                  {selectedInvoiceTemplate.line_items?.length || 0} line items · {selectedInvoiceTemplate.currency_code} · Due in {selectedInvoiceTemplate.default_due_days ?? 'manual'} days
-                </div>
-                <div className="mt-3 divide-y divide-blue-100 rounded-lg bg-white">
-                  {(selectedInvoiceTemplate.line_items || []).map((item, index) => (
-                    <div key={`${selectedInvoiceTemplate.id}-preview-${index}`} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
-                      <span className="font-semibold text-gray-700">{item.name || `Line item ${index + 1}`}</span>
-                      <span className="text-gray-600">
-                        {Number(item.quantity || 0)} x {formatCents(parseMoneyToCents(item.unitAmount), selectedInvoiceTemplate.currency_code)}
-                      </span>
-                    </div>
-                  ))}
-                  <div className="flex items-center justify-between px-3 py-2 text-sm font-black text-gray-950">
-                    <span>Template total</span>
-                    <span>{formatCents(invoiceDraftTotalCents, invoiceDraftCurrency)}</span>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="mt-4 rounded-xl border border-gray-100 bg-gray-50 p-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-bold text-gray-900">Manual Line Items</p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Use this when you do not want to rely on a stored template.
-                    </p>
-                  </div>
-                  <button
-                    onClick={addInvoiceComposerLineItem}
-                    className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-white"
-                  >
-                    <Plus size={14} />
-                    Item
-                  </button>
-                </div>
-
-                <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <div>
-                    <label className="mb-1 block text-sm font-medium text-gray-700">Currency</label>
-                    <input
-                      value={invoiceComposer.currency}
-                      onChange={(event) => handleInvoiceComposerFieldChange('currency', event.target.value)}
-                      maxLength={3}
-                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm uppercase focus:border-orange-400 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="mt-4 space-y-3">
-                  {invoiceComposer.items.map((item, index) => (
-                    <div key={`invoice-composer-line-${index}`} className="rounded-lg border border-gray-200 bg-white p-3">
-                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                        <input
-                          placeholder="Item name"
-                          value={item.name}
-                          onChange={(event) => handleInvoiceComposerLineItemChange(index, 'name', event.target.value)}
-                          className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                        />
-                        <input
-                          type="number"
-                          min="0.01"
-                          step="0.01"
-                          placeholder="Unit amount"
-                          value={item.unitAmount}
-                          onChange={(event) => handleInvoiceComposerLineItemChange(index, 'unitAmount', event.target.value)}
-                          className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                        />
-                        <input
-                          type="number"
-                          min="1"
-                          step="1"
-                          placeholder="Quantity"
-                          value={item.quantity}
-                          onChange={(event) => handleInvoiceComposerLineItemChange(index, 'quantity', event.target.value)}
-                          className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                        />
-                        <input
-                          placeholder="Item description"
-                          value={item.description}
-                          onChange={(event) => handleInvoiceComposerLineItemChange(index, 'description', event.target.value)}
-                          className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                        />
-                      </div>
-                      <div className="mt-3 flex justify-end">
-                        <div className="mr-auto text-xs font-semibold text-gray-500">
-                          Subtotal: {formatCents(calculateLineItemSubtotalCents(item), invoiceDraftCurrency)}
-                        </div>
-                        <button
-                          onClick={() => removeInvoiceComposerLineItem(index)}
-                          disabled={invoiceComposer.items.length === 1}
-                          className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-                        >
-                          <Trash2 size={14} />
-                          Remove
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="mt-5 flex flex-wrap gap-3">
-              <button
-                onClick={handleInvoiceComposerSubmit}
-                disabled={busyAction === 'create-invoice'}
-                className="inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-                style={{ backgroundColor: isPayPalInvoiceWorkspace ? PAYPAL_BRAND.blue : brand }}
-              >
-                <Send size={16} className={busyAction === 'create-invoice' ? 'animate-pulse' : ''} />
-                Create Official Invoice
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div
-              className="rounded-2xl border bg-white p-5 shadow-sm"
-              style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
-            >
-              <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Draft Preview</p>
-              <div className="mt-4 space-y-3">
-                <DetailRow label="Recipient" value={invoiceComposer.recipientEmail || 'Add recipient email'} />
-                <DetailRow
-                  label="Template"
-                  value={selectedInvoiceTemplate ? selectedInvoiceTemplate.name : 'Manual line items'}
-                />
-                <DetailRow label="Line Items" value={`${invoiceDraftItems.length} item${invoiceDraftItems.length === 1 ? '' : 's'}`} />
-                <DetailRow
-                  label="Draft Total"
-                  value={
-                    invoicePreview
-                      ? `${invoicePreview.total} ${invoicePreview.currency}`
-                      : formatCents(invoiceDraftTotalCents, invoiceDraftCurrency)
-                  }
-                />
-                <DetailRow label="Risk Path" value={invoicePreview?.risk_decision || 'Preview pending'} />
-                <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-900">
-                  PayPal will create the hosted invoice link after you confirm submission.
-                </div>
-              </div>
-            </div>
-
-            {lastCreatedInvoice ? (
-              <div
-                className="rounded-2xl border p-5 shadow-sm"
-                style={{
-                  borderColor: PAYPAL_BRAND.border,
-                  background: isPayPalInvoiceWorkspace
-                    ? 'linear-gradient(180deg, rgba(0,156,222,0.08), rgba(255,255,255,1))'
-                    : undefined
-                }}
-              >
-                <p className="text-xs font-black uppercase tracking-[0.18em]" style={{ color: isPayPalInvoiceWorkspace ? PAYPAL_BRAND.blue : undefined }}>
-                  Last Created
-                </p>
-                <p className="mt-3 text-lg font-black tracking-[-0.03em]" style={{ color: isPayPalInvoiceWorkspace ? PAYPAL_BRAND.ink : undefined }}>
-                  {lastCreatedInvoice.summary?.invoice_number || lastCreatedInvoice.invoice_id}
-                </p>
-                <div className="mt-2 text-sm text-slate-600">
-                  {lastCreatedInvoice.summary?.recipient_email}
-                </div>
-                <div className="mt-1 text-sm font-semibold text-slate-900">
-                  {lastCreatedInvoice.summary?.amount} {lastCreatedInvoice.summary?.currency}
-                </div>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {lastCreatedInvoice.invoice_link ? (
-                    <a
-                      href={lastCreatedInvoice.invoice_link}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
-                    >
-                      <ExternalLink size={14} />
-                      Open PayPal
-                    </a>
-                  ) : null}
-                  <button
-                    onClick={() => handleSectionJump('invoices')}
-                    className="inline-flex items-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-white"
-                  >
-                    <QrCode size={14} />
-                    View In Records
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </div>
+        <InvoiceComposerSection
+          brand={brand}
+          busyAction={busyAction}
+          invoiceComposer={invoiceComposer}
+          invoiceDraftCurrency={invoiceDraftCurrency}
+          invoiceDraftItems={invoiceDraftItems}
+          invoiceDraftTotalCents={invoiceDraftTotalCents}
+          invoicePreview={invoicePreview}
+          invoiceTemplates={invoiceTemplates}
+          isPayPalInvoiceWorkspace={isPayPalInvoiceWorkspace}
+          lastCreatedInvoice={lastCreatedInvoice}
+          onAddLineItem={addInvoiceComposerLineItem}
+          onFieldChange={handleInvoiceComposerFieldChange}
+          onLineItemChange={handleInvoiceComposerLineItemChange}
+          onRemoveLineItem={removeInvoiceComposerLineItem}
+          onReset={resetInvoiceComposer}
+          onSubmit={handleInvoiceComposerSubmit}
+          onViewRecords={() => handleSectionJump('invoices')}
+          sectionRef={registerSectionRef('payout-composer')}
+          selectedInvoiceTemplate={selectedInvoiceTemplate}
+        />
       ) : null}
 
       {renderPayoutComposer ? (
@@ -1996,101 +1650,13 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false, provi
       ) : null}
 
       {renderFundingOrders ? (
-        <div ref={registerSectionRef('funding-orders')} className="scroll-mt-28 space-y-4">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h3 className="text-lg font-bold text-gray-900">Funding Orders</h3>
-            <p className="text-sm text-gray-500">
-              Review user point purchases before ledger credit is released.
-            </p>
-          </div>
-          <p className="text-sm text-gray-500">{adminTopUpOrders.length} tracked orders</p>
-        </div>
-
-        <div className="overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm">
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[920px]">
-              <thead className="border-b border-gray-100 bg-gray-50">
-                <tr>
-                  {['Order', 'User', 'Funding Method', 'Points', 'Status', 'Actions'].map((heading) => (
-                    <th key={heading} className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {adminTopUpOrders.map((order) => {
-                  const closed = ['completed', 'cancelled'].includes(order.status);
-
-                  return (
-                    <tr key={order.order_id} className="border-b border-gray-100 align-top hover:bg-gray-50">
-                      <td className="px-6 py-4">
-                        <div className="font-semibold text-gray-900">{order.order_id}</div>
-                        <div className="mt-1 text-xs text-gray-500">Created: {formatDateTime(order.created_at)}</div>
-                        {order.submitted_at && (
-                          <div className="mt-1 text-xs text-amber-700">
-                            Submitted: {formatDateTime(order.submitted_at)}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{order.user_id || order.userId}</td>
-                      <td className="px-6 py-4 text-sm text-gray-700">
-                        <div className="font-medium text-gray-900">{order.method_title || 'Manual funding'}</div>
-                        <div className="mt-1 text-xs text-gray-500">{order.service_intent || 'General balance'}</div>
-                        {order.vendor_url && (
-                          <a
-                            href={order.vendor_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-orange-600 hover:text-orange-700"
-                          >
-                            <ExternalLink size={13} />
-                            Open funding link
-                          </a>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 text-sm font-semibold text-gray-900">
-                        {Number(order.points || 0).toLocaleString()} pts
-                        <div className="mt-1 text-xs font-normal text-gray-500">{order.amount_label}</div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <StatusPill value={(order.status || 'pending').replaceAll('_', ' ')} tone={getTopUpOrderTone(order.status)} />
-                        {order.admin_notes && (
-                          <div className="mt-2 text-xs text-gray-500">{order.admin_notes}</div>
-                        )}
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => handleTopUpOrderComplete(order)}
-                            disabled={closed || Boolean(busyAction)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
-                          >
-                            <CheckCircle2 size={14} />
-                            Complete
-                          </button>
-                          <button
-                            onClick={() => handleTopUpOrderCancel(order)}
-                            disabled={closed || Boolean(busyAction)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-                          >
-                            <ShieldX size={14} />
-                            Cancel
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          {adminTopUpOrders.length === 0 && (
-            <div className="px-6 py-10 text-center text-sm text-gray-500">No funding orders yet.</div>
-          )}
-        </div>
-        </div>
+        <FundingOrdersPanel
+          adminTopUpOrders={adminTopUpOrders}
+          busyAction={busyAction}
+          onCancel={handleTopUpOrderCancel}
+          onComplete={handleTopUpOrderComplete}
+          sectionRef={registerSectionRef('funding-orders')}
+        />
       ) : null}
 
       {showReminderCadence ? (
@@ -2213,137 +1779,15 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false, provi
       ) : null}
 
       {renderPaymentIssues ? (
-        <div ref={registerSectionRef('payment-issues')} className="scroll-mt-28 space-y-4">
-        <div className="flex items-center justify-between">
-          <h3
-            className="text-lg font-bold text-gray-900"
-            style={isPayPalEmbeddedWorkspace ? { color: PAYPAL_BRAND.ink } : undefined}
-          >
-            Payment Issues
-          </h3>
-          <p className="text-sm text-gray-500">{paymentIssues.length} tracked operational issues</p>
-        </div>
-
-        <div
-          className="rounded-2xl border bg-white p-6 shadow-sm"
-          style={isPayPalEmbeddedWorkspace ? { borderColor: PAYPAL_BRAND.border, boxShadow: '0 16px 40px rgba(0,48,135,0.06)' } : undefined}
-        >
-          {paymentIssues.length === 0 ? (
-            <div className="text-sm text-gray-500">No open issues from reconciliation or provider sync.</div>
-          ) : (
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              {paymentIssues.map((issue) => (
-                <div
-                  key={issue.payment_issue_id}
-                  className="rounded-xl border p-4"
-                  style={
-                    isPayPalEmbeddedWorkspace
-                      ? {
-                          borderColor: PAYPAL_BRAND.border,
-                          background: 'linear-gradient(180deg, rgba(244,248,255,0.9), rgba(255,255,255,1))'
-                        }
-                      : undefined
-                  }
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p
-                        className="text-sm font-semibold text-gray-900"
-                        style={isPayPalEmbeddedWorkspace ? { color: PAYPAL_BRAND.ink } : undefined}
-                      >
-                        {issue.summary}
-                      </p>
-                      <p className="mt-1 text-xs text-gray-500">
-                        {issue.entity_type} · {issue.entity_id}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <StatusPill value={issue.severity} tone={issue.severity === 'HIGH' ? 'red' : 'amber'} />
-                      <StatusPill value={issue.status} tone={issue.status === 'OPEN' ? 'red' : 'green'} />
-                    </div>
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-3 text-xs text-gray-500">
-                    <span>Type: {issue.issue_type}</span>
-                    <span>Last Seen: {formatDateTime(issue.last_seen_at)}</span>
-                  </div>
-                  {(issue.acknowledgement?.acknowledged_at || issue.resolution?.resolved_at) && (
-                    <div className="mt-3 space-y-1 text-xs text-gray-500">
-                      {issue.acknowledgement?.acknowledged_at && (
-                        <div>
-                          Acknowledged: {formatDateTime(issue.acknowledgement.acknowledged_at)}
-                          {issue.acknowledgement.acknowledged_by_actor_id
-                            ? ` · ${issue.acknowledgement.acknowledged_by_actor_id}`
-                            : ''}
-                        </div>
-                      )}
-                      {issue.resolution?.resolved_at && (
-                        <div>
-                          Resolved: {formatDateTime(issue.resolution.resolved_at)}
-                          {issue.resolution.resolved_by_actor_id ? ` · ${issue.resolution.resolved_by_actor_id}` : ''}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <div className="mt-3">
-                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      Operator Note
-                    </label>
-                    <textarea
-                      value={issueNotes[issue.payment_issue_id] || ''}
-                      onChange={(event) =>
-                        setIssueNotes((previous) => ({
-                          ...previous,
-                          [issue.payment_issue_id]: event.target.value
-                        }))
-                      }
-                      rows={2}
-                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                      placeholder="Add an acknowledgement or resolution note"
-                    />
-                  </div>
-                  {issue.metadata && Object.keys(issue.metadata).length > 0 && (
-                    <pre className="mt-3 overflow-x-auto rounded-lg bg-gray-950 p-3 text-xs text-gray-100">
-                      {JSON.stringify(issue.metadata, null, 2)}
-                    </pre>
-                  )}
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {issue.status !== 'ACKNOWLEDGED' && issue.status !== 'RESOLVED' && (
-                      <button
-                        onClick={() => handleIssueAction(issue, 'acknowledge')}
-                        disabled={Boolean(busyAction)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                      >
-                        <MessageSquare size={14} />
-                        Acknowledge
-                      </button>
-                    )}
-                    {issue.status !== 'RESOLVED' && (
-                      <button
-                        onClick={() => handleIssueAction(issue, 'resolve')}
-                        disabled={Boolean(busyAction)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
-                      >
-                        <CheckCircle2 size={14} />
-                        Resolve
-                      </button>
-                    )}
-                    {issue.status === 'RESOLVED' && (
-                      <button
-                        onClick={() => handleIssueAction(issue, 'reopen')}
-                        disabled={Boolean(busyAction)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                      >
-                        <RotateCcw size={14} />
-                        Reopen
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-        </div>
+        <PaymentIssuesPanel
+          busyAction={busyAction}
+          isPayPalEmbeddedWorkspace={isPayPalEmbeddedWorkspace}
+          issueNotes={issueNotes}
+          onIssueAction={handleIssueAction}
+          paymentIssues={paymentIssues}
+          sectionRef={registerSectionRef('payment-issues')}
+          setIssueNotes={setIssueNotes}
+        />
       ) : null}
 
       {showInvoiceTemplates ? (
@@ -2557,615 +2001,110 @@ export default function AdminPaymentsTab({ mode = 'all', embedded = false, provi
 
       {showInvoices ? (
         <div ref={registerSectionRef('invoices')} className="scroll-mt-28 space-y-4">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <h3
-              className="text-lg font-bold text-gray-900"
-              style={isPayPalInvoiceWorkspace ? { color: PAYPAL_BRAND.ink } : undefined}
-            >
-              Invoices
-            </h3>
-            <p className="text-sm text-gray-500">
-              {filteredInvoices.length} shown
-              {invoicePagination?.total ? ` of ${invoicePagination.total}` : ` of ${invoices.length}`} official invoice records
-            </p>
-          </div>
-          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-7">
-            <input
-              value={invoiceSearch}
-              onChange={(event) => setInvoiceSearch(event.target.value)}
-              placeholder="Recipient or number"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-            />
-            <input
-              value={invoiceProviderSearch}
-              onChange={(event) => setInvoiceProviderSearch(event.target.value)}
-              placeholder="PayPal invoice ID"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-            />
-            <select
-              value={invoiceStatusFilter}
-              onChange={(event) => setInvoiceStatusFilter(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-            >
-              {invoiceStatusOptions.map((status) => (
-                <option key={status} value={status}>
-                  {status === 'ALL' ? 'All statuses' : status}
-                </option>
-              ))}
-            </select>
-            <select
-              value={invoiceTemplateFilter}
-              onChange={(event) => setInvoiceTemplateFilter(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-              aria-label="Invoice template"
-            >
-              <option value="ALL">All templates</option>
-              {invoiceTemplates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.name}
-                </option>
-              ))}
-            </select>
-            <input
-              type="date"
-              value={invoiceDateFrom}
-              onChange={(event) => setInvoiceDateFrom(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-              aria-label="Invoice date from"
-            />
-            <input
-              type="date"
-              value={invoiceDateTo}
-              onChange={(event) => setInvoiceDateTo(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-              aria-label="Invoice date to"
-            />
-            <div className="grid grid-cols-2 gap-2">
-              <select
-                value={invoiceSortBy}
-                onChange={(event) => setInvoiceSortBy(event.target.value)}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                aria-label="Invoice sort field"
-              >
-                <option value="createdAt">Created</option>
-                <option value="updatedAt">Updated</option>
-                <option value="amount">Amount</option>
-                <option value="recipient">Recipient</option>
-                <option value="status">Status</option>
-                <option value="dueDate">Due</option>
-              </select>
-              <select
-                value={invoiceSortDirection}
-                onChange={(event) => setInvoiceSortDirection(event.target.value)}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                aria-label="Invoice sort direction"
-              >
-                <option value="desc">Desc</option>
-                <option value="asc">Asc</option>
-              </select>
-            </div>
-            <select
-              value={invoicePageSize}
-              onChange={(event) => setInvoicePageSize(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-              aria-label="Invoice page size"
-            >
-              <option value="25">25 rows</option>
-              <option value="50">50 rows</option>
-              <option value="100">100 rows</option>
-              <option value="250">250 rows</option>
-            </select>
-          </div>
-        </div>
+        <InvoiceFilters
+          customInvoiceSavedViews={customInvoiceSavedViews}
+          filteredInvoices={filteredInvoices}
+          invoiceDateFrom={invoiceDateFrom}
+          invoiceDateTo={invoiceDateTo}
+          invoicePageSize={invoicePageSize}
+          invoicePagination={invoicePagination}
+          invoiceProviderSearch={invoiceProviderSearch}
+          invoiceSavedViewName={invoiceSavedViewName}
+          invoiceSearch={invoiceSearch}
+          invoiceSortBy={invoiceSortBy}
+          invoiceSortDirection={invoiceSortDirection}
+          invoiceStatusFilter={invoiceStatusFilter}
+          invoiceStatusOptions={invoiceStatusOptions}
+          invoiceTemplateFilter={invoiceTemplateFilter}
+          invoiceTemplates={invoiceTemplates}
+          invoices={invoices}
+          isPayPalInvoiceWorkspace={isPayPalInvoiceWorkspace}
+          onApplySavedView={applyInvoiceSavedView}
+          onDeleteSavedView={handleDeleteInvoiceSavedView}
+          onSaveSavedView={handleSaveInvoiceSavedView}
+          setInvoiceDateFrom={setInvoiceDateFrom}
+          setInvoiceDateTo={setInvoiceDateTo}
+          setInvoicePageSize={setInvoicePageSize}
+          setInvoiceProviderSearch={setInvoiceProviderSearch}
+          setInvoiceSavedViewName={setInvoiceSavedViewName}
+          setInvoiceSearch={setInvoiceSearch}
+          setInvoiceSortBy={setInvoiceSortBy}
+          setInvoiceSortDirection={setInvoiceSortDirection}
+          setInvoiceStatusFilter={setInvoiceStatusFilter}
+          setInvoiceTemplateFilter={setInvoiceTemplateFilter}
+        />
 
-        <div className="flex flex-wrap items-center gap-2">
-          {BUILT_IN_INVOICE_SAVED_VIEWS.map((view) => (
-            <button
-              key={view.id}
-              onClick={() => applyInvoiceSavedView(view.id)}
-              className="inline-flex rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
-            >
-              {view.label}
-            </button>
-          ))}
-          {customInvoiceSavedViews.map((view) => (
-            <span key={view.id} className="inline-flex overflow-hidden rounded-full border border-blue-200 bg-blue-50">
-              <button
-                type="button"
-                onClick={() => applyInvoiceSavedView(view.id)}
-                className="px-3 py-1.5 text-xs font-bold text-blue-800 hover:bg-blue-100"
-              >
-                {view.label}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDeleteInvoiceSavedView(view.id)}
-                className="border-l border-blue-200 px-2 text-blue-700 hover:bg-blue-100"
-                aria-label={`Delete ${view.label}`}
-              >
-                <X size={13} />
-              </button>
-            </span>
-          ))}
-          <div className="flex min-w-[240px] overflow-hidden rounded-full border border-gray-300 bg-white">
-            <input
-              value={invoiceSavedViewName}
-              onChange={(event) => setInvoiceSavedViewName(event.target.value)}
-              placeholder="Save current invoice view"
-              className="min-w-0 flex-1 px-3 py-1.5 text-xs font-semibold text-gray-700 outline-none"
-            />
-            <button
-              type="button"
-              onClick={handleSaveInvoiceSavedView}
-              className="inline-flex items-center gap-1 border-l border-gray-200 px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
-            >
-              <Plus size={13} />
-              Save
-            </button>
-          </div>
-        </div>
-
-        {isPayPalInvoiceWorkspace ? (
-          <div
-            className="rounded-2xl border p-4"
-            style={{
-              borderColor: PAYPAL_BRAND.border,
-              background: 'linear-gradient(180deg, rgba(0,156,222,0.06), rgba(255,255,255,1))'
-            }}
-          >
-            <div className="flex flex-wrap gap-2">
-              {[
-                'PAID: payment completed',
-                'SENT: customer link active',
-                'UPDATED: invoice changed after send',
-                'CANCELLED: invoice voided',
-                'QR Ready: official QR generated'
-              ].map((item) => (
-                <div
-                  key={item}
-                  className="inline-flex rounded-full border bg-white px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.14em]"
-                  style={{ borderColor: PAYPAL_BRAND.border, color: PAYPAL_BRAND.blue }}
-                >
-                  {item}
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
-        <div
-          className="overflow-hidden rounded-2xl border bg-white shadow-sm"
-          style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border, boxShadow: '0 18px 40px rgba(0,48,135,0.06)' } : undefined}
-        >
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[980px]">
-              <thead
-                className="border-b bg-gray-50"
-                style={
-                  isPayPalInvoiceWorkspace
-                    ? {
-                        borderColor: PAYPAL_BRAND.border,
-                        background: 'linear-gradient(180deg, rgba(0,48,135,0.06), rgba(244,248,255,1))'
-                      }
-                    : undefined
-                }
-              >
-                <tr>
-                  {['Invoice', 'Recipient', 'Amount', 'Status', 'Official PayPal', 'Actions'].map((heading) => (
-                    <th key={heading} className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filteredInvoices.map((invoice) => (
-                  <React.Fragment key={invoice.internal_invoice_id}>
-                    <tr
-                      className="border-b align-top hover:bg-gray-50"
-                      style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
-                    >
-                      <td className="px-6 py-4">
-                        <div
-                          className="font-semibold text-gray-900"
-                          style={isPayPalInvoiceWorkspace ? { color: PAYPAL_BRAND.ink } : undefined}
-                        >
-                          {invoice.summary.invoice_number}
-                        </div>
-                        <div className="mt-1 text-xs text-gray-500">{invoice.invoice_id}</div>
-                      </td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{invoice.summary.recipient_email}</td>
-                      <td className="px-6 py-4 text-sm font-semibold text-gray-900">
-                        {invoice.summary.amount} {invoice.summary.currency}
-                      </td>
-                      <td className="px-6 py-4">
-                        <StatusPill
-                          value={invoice.status}
-                          tone={invoice.status === 'PAID' ? 'green' : invoice.status === 'FAILED' ? 'red' : 'blue'}
-                        />
-                      </td>
-                      <td className="px-6 py-4 text-sm text-gray-600">
-                        <div>Issue Date: {invoice.summary.issue_date || 'Immediate send'}</div>
-                        <div className="mt-1">Due: {invoice.summary.due_date || 'Not set'}</div>
-                        <div className="mt-1">Synced: {formatDateTime(invoice.official_paypal?.last_synced_at)}</div>
-                        <div className="mt-1">
-                          QR: {invoice.official_paypal?.qr?.image_url_png ? 'Ready' : 'Not generated'}
-                        </div>
-                        <div className="mt-1">
-                          Auto reminders: {invoice.summary.auto_reminders_cancelled_at ? 'Stopped' : 'Active'}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <button
-                          onClick={() => setDetailDrawer({ type: 'invoice', id: invoice.internal_invoice_id })}
-                          className="mb-2 inline-flex items-center gap-1 rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50"
-                        >
-                          <Eye size={14} />
-                          Details
-                        </button>
-                        <InvoiceActions
-                          invoice={invoice}
-                          busyAction={busyAction}
-                          onRefresh={(item) =>
-                            handleInvoiceAction('refresh', item, refreshInvoice, 'Invoice refreshed')
-                          }
-                          onReminder={(item) =>
-                            handleInvoiceAction('remind', item, sendInvoiceReminder, 'Reminder sent')
-                          }
-                          onCancelReminders={handleInvoiceReminderCancellation}
-                          onQr={(item) =>
-                            handleInvoiceAction('qr', item, generateInvoiceQr, 'Official PayPal QR generated')
-                          }
-                          onCancel={handleInvoiceCancel}
-                          onReviewRequired={handleMarkInvoiceReviewRequired}
-                          onTimelineToggle={toggleInvoiceTimeline}
-                          timelineOpen={invoiceTimelineId === invoice.internal_invoice_id}
-                        />
-                      </td>
-                    </tr>
-                    {invoiceTimelineId === invoice.internal_invoice_id && (
-                      <tr
-                        className="border-b bg-white"
-                        style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
-                      >
-                        <td colSpan={6} className="px-6 py-5">
-                          <TimelinePanel
-                            title={`Invoice Timeline · ${invoice.summary.invoice_number}`}
-                            loading={invoiceTimelineLoading}
-                            entries={invoiceTimelineEntries}
-                          />
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {filteredInvoices.length === 0 && (
-            <div className="px-6 py-10 text-center text-sm text-gray-500">No invoices yet.</div>
-          )}
-          <PaginationControls
-            pagination={invoicePagination}
-            onPrevious={() => setInvoicePage((page) => Math.max(1, page - 1))}
-            onNext={() => setInvoicePage((page) => page + 1)}
-          />
-        </div>
+        <InvoiceRecordsTable
+          busyAction={busyAction}
+          filteredInvoices={filteredInvoices}
+          generateInvoiceQr={generateInvoiceQr}
+          handleInvoiceAction={handleInvoiceAction}
+          handleInvoiceCancel={handleInvoiceCancel}
+          handleInvoiceReminderCancellation={handleInvoiceReminderCancellation}
+          handleMarkInvoiceReviewRequired={handleMarkInvoiceReviewRequired}
+          invoicePagination={invoicePagination}
+          invoiceTimelineEntries={invoiceTimelineEntries}
+          invoiceTimelineId={invoiceTimelineId}
+          invoiceTimelineLoading={invoiceTimelineLoading}
+          isPayPalInvoiceWorkspace={isPayPalInvoiceWorkspace}
+          onNextPage={() => setInvoicePage((page) => page + 1)}
+          onOpenDetail={(invoice) => setDetailDrawer({ type: 'invoice', id: invoice.internal_invoice_id })}
+          onPreviousPage={() => setInvoicePage((page) => Math.max(1, page - 1))}
+          refreshInvoice={refreshInvoice}
+          sendInvoiceReminder={sendInvoiceReminder}
+          toggleInvoiceTimeline={toggleInvoiceTimeline}
+        />
         </div>
       ) : null}
 
       {renderPayoutActivity ? (
         <div ref={registerSectionRef('payouts')} className="scroll-mt-28 space-y-4">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <h3
-              className="text-lg font-bold text-gray-900"
-              style={isPayPalPayoutWorkspace ? { color: PAYPAL_BRAND.ink } : undefined}
-            >
-              {isPayPalPayoutWorkspace ? 'Activity' : 'Payouts'}
-            </h3>
-            <p className="text-sm text-gray-500">
-              {filteredPayouts.length} shown
-              {payoutPagination?.total ? ` of ${payoutPagination.total}` : ` of ${payouts.length}`} tracked payout records
-            </p>
-          </div>
-          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-            <input
-              value={payoutSearch}
-              onChange={(event) => setPayoutSearch(event.target.value)}
-              placeholder="Recipient, payout, batch"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-            />
-            <select
-              value={payoutStatusFilter}
-              onChange={(event) => setPayoutStatusFilter(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-            >
-              {payoutStatusOptions.map((status) => (
-                <option key={status} value={status}>
-                  {status === 'ALL' ? 'All internal statuses' : status}
-                </option>
-              ))}
-            </select>
-            <select
-              value={payoutProviderFilter}
-              onChange={(event) => setPayoutProviderFilter(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-            >
-              {payoutProviderOptions.map((status) => (
-                <option key={status} value={status}>
-                  {status === 'ALL' ? 'All provider states' : status}
-                </option>
-              ))}
-            </select>
-            <input
-              type="date"
-              value={payoutDateFrom}
-              onChange={(event) => setPayoutDateFrom(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-              aria-label="Payout date from"
-            />
-            <input
-              type="date"
-              value={payoutDateTo}
-              onChange={(event) => setPayoutDateTo(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-              aria-label="Payout date to"
-            />
-            <div className="grid grid-cols-2 gap-2">
-              <select
-                value={payoutSortBy}
-                onChange={(event) => setPayoutSortBy(event.target.value)}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                aria-label="Payout sort field"
-              >
-                <option value="createdAt">Created</option>
-                <option value="updatedAt">Updated</option>
-                <option value="amount">Amount</option>
-                <option value="receiver">Receiver</option>
-                <option value="status">Status</option>
-              </select>
-              <select
-                value={payoutSortDirection}
-                onChange={(event) => setPayoutSortDirection(event.target.value)}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-                aria-label="Payout sort direction"
-              >
-                <option value="desc">Desc</option>
-                <option value="asc">Asc</option>
-              </select>
-            </div>
-            <select
-              value={payoutPageSize}
-              onChange={(event) => setPayoutPageSize(event.target.value)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none"
-              aria-label="Payout page size"
-            >
-              <option value="25">25 rows</option>
-              <option value="50">50 rows</option>
-              <option value="100">100 rows</option>
-              <option value="250">250 rows</option>
-            </select>
-          </div>
-        </div>
+        <PayoutFilters
+          customPayoutSavedViews={customPayoutSavedViews}
+          filteredPayouts={filteredPayouts}
+          isPayPalPayoutWorkspace={isPayPalPayoutWorkspace}
+          payoutDateFrom={payoutDateFrom}
+          payoutDateTo={payoutDateTo}
+          payoutPageSize={payoutPageSize}
+          payoutPagination={payoutPagination}
+          payoutProviderFilter={payoutProviderFilter}
+          payoutProviderOptions={payoutProviderOptions}
+          payoutSavedViewName={payoutSavedViewName}
+          payoutSearch={payoutSearch}
+          payoutSortBy={payoutSortBy}
+          payoutSortDirection={payoutSortDirection}
+          payoutStatusFilter={payoutStatusFilter}
+          payoutStatusOptions={payoutStatusOptions}
+          payouts={payouts}
+          onApplySavedView={applyPayoutSavedView}
+          onDeleteSavedView={handleDeletePayoutSavedView}
+          onSaveSavedView={handleSavePayoutSavedView}
+          setPayoutDateFrom={setPayoutDateFrom}
+          setPayoutDateTo={setPayoutDateTo}
+          setPayoutPageSize={setPayoutPageSize}
+          setPayoutProviderFilter={setPayoutProviderFilter}
+          setPayoutSavedViewName={setPayoutSavedViewName}
+          setPayoutSearch={setPayoutSearch}
+          setPayoutSortBy={setPayoutSortBy}
+          setPayoutSortDirection={setPayoutSortDirection}
+          setPayoutStatusFilter={setPayoutStatusFilter}
+        />
 
-        <div className="flex flex-wrap items-center gap-2">
-          {BUILT_IN_PAYOUT_SAVED_VIEWS.map((view) => (
-            <button
-              key={view.id}
-              onClick={() => applyPayoutSavedView(view.id)}
-              className="inline-flex rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
-            >
-              {view.label}
-            </button>
-          ))}
-          {customPayoutSavedViews.map((view) => (
-            <span key={view.id} className="inline-flex overflow-hidden rounded-full border border-blue-200 bg-blue-50">
-              <button
-                type="button"
-                onClick={() => applyPayoutSavedView(view.id)}
-                className="px-3 py-1.5 text-xs font-bold text-blue-800 hover:bg-blue-100"
-              >
-                {view.label}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDeletePayoutSavedView(view.id)}
-                className="border-l border-blue-200 px-2 text-blue-700 hover:bg-blue-100"
-                aria-label={`Delete ${view.label}`}
-              >
-                <X size={13} />
-              </button>
-            </span>
-          ))}
-          <div className="flex min-w-[240px] overflow-hidden rounded-full border border-gray-300 bg-white">
-            <input
-              value={payoutSavedViewName}
-              onChange={(event) => setPayoutSavedViewName(event.target.value)}
-              placeholder="Save current payout view"
-              className="min-w-0 flex-1 px-3 py-1.5 text-xs font-semibold text-gray-700 outline-none"
-            />
-            <button
-              type="button"
-              onClick={handleSavePayoutSavedView}
-              className="inline-flex items-center gap-1 border-l border-gray-200 px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
-            >
-              <Plus size={13} />
-              Save
-            </button>
-          </div>
-        </div>
-
-        {isPayPalPayoutWorkspace ? (
-          <div
-            className="rounded-2xl border bg-white p-4"
-            style={{
-              borderColor: PAYPAL_BRAND.border,
-              boxShadow: '0 14px 34px rgba(0,20,53,0.05)'
-            }}
-          >
-            <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-sm font-black" style={{ color: PAYPAL_BRAND.ink }}>Provider states</p>
-              <p className="text-xs font-semibold" style={{ color: PAYPAL_BRAND.muted }}>
-                PayPal sandbox item statuses mapped into the payout queue
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {[
-                'PENDING: provider processing',
-                'UNCLAIMED: can be cancelled',
-                'ONHOLD: provider review',
-                'RETURNED: funds sent back',
-                'SUCCESS: recipient paid'
-              ].map((item) => (
-                <div
-                  key={item}
-                  className="inline-flex rounded-full border bg-white px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.14em]"
-                  style={{ borderColor: PAYPAL_BRAND.border, color: PAYPAL_BRAND.actionBlue }}
-                >
-                  {item}
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
-        <div
-          className="overflow-hidden rounded-2xl border bg-white shadow-sm"
-          style={isPayPalPayoutWorkspace ? { borderColor: PAYPAL_BRAND.border, boxShadow: '0 18px 40px rgba(0,48,135,0.06)' } : undefined}
-        >
-          <div className="overflow-x-auto">
-            <table className={`w-full ${isPayPalPayoutWorkspace ? 'min-w-[860px]' : 'min-w-[1040px]'}`}>
-              <thead
-                className="border-b bg-gray-50"
-                style={
-                  isPayPalPayoutWorkspace
-                    ? {
-                        borderColor: PAYPAL_BRAND.border,
-                        backgroundColor: PAYPAL_BRAND.shell
-                      }
-                    : undefined
-                }
-              >
-                <tr>
-                  {['Payout', 'Receiver', 'Amount', 'Risk', 'Provider State', 'Actions'].map((heading) => (
-                    <th key={heading} className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filteredPayouts.map((payout) => (
-                  <React.Fragment key={payout.payout_id}>
-                    <tr
-                      className="border-b align-top hover:bg-gray-50"
-                      style={isPayPalPayoutWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
-                    >
-                      <td className="px-6 py-4">
-                        <div
-                          className="font-semibold text-gray-900"
-                          style={isPayPalPayoutWorkspace ? { color: PAYPAL_BRAND.ink } : undefined}
-                        >
-                          {payout.payout_id}
-                        </div>
-                        <div className="mt-1 text-xs text-gray-500">
-                          Batch: {payout.tracking.sender_batch_id || 'Pending'}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{payout.summary.receiver}</td>
-                      <td className="px-6 py-4 text-sm font-semibold text-gray-900">
-                        {payout.summary.amount} {payout.summary.currency}
-                      </td>
-                      <td className="px-6 py-4">
-                        <StatusPill
-                          value={payout.risk_decision}
-                          tone={
-                            payout.risk_decision === 'APPROVED'
-                              ? 'green'
-                              : payout.risk_decision === 'BLOCKED'
-                                ? 'red'
-                                : 'amber'
-                          }
-                        />
-                      </td>
-                      <td className="px-6 py-4 text-sm text-gray-600">
-                        <div className="flex items-center gap-2">
-                          <StatusPill
-                            value={payout.status}
-                            tone={
-                              payout.status === 'SUCCESS'
-                                ? 'green'
-                                : payout.status === 'FAILED' || payout.status === 'DENIED'
-                                  ? 'red'
-                                  : 'blue'
-                            }
-                          />
-                        </div>
-                        <div className="mt-2 text-xs text-gray-500">
-                          Provider item: {payout.official_paypal?.provider_item_status || payout.metadata?.provider_item_status || 'Unknown'}
-                        </div>
-                        <div className="mt-1 text-xs text-gray-500">
-                          Synced: {formatDateTime(payout.official_paypal?.last_synced_at || payout.metadata?.last_synced_at)}
-                        </div>
-                        {payout.official_paypal?.provider_issue_code && (
-                          <div className="mt-1 text-xs text-amber-700">
-                            Issue code: {payout.official_paypal.provider_issue_code}
-                          </div>
-                        )}
-                        {payout.official_paypal?.remediation?.reason && (
-                          <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                            {payout.official_paypal.remediation.reason}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-6 py-4">
-                        <button
-                          onClick={() => setDetailDrawer({ type: 'payout', id: payout.payout_id })}
-                          className="mb-2 inline-flex items-center gap-1 rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50"
-                        >
-                          <Eye size={14} />
-                          Details
-                        </button>
-                        <PayoutActions
-                          payout={payout}
-                          busyAction={busyAction}
-                          onRefresh={handlePayoutRefresh}
-                          onCancelUnclaimed={handleCancelUnclaimedPayout}
-                          onTimelineToggle={togglePayoutTimeline}
-                          timelineOpen={payoutTimelineId === payout.payout_id}
-                        />
-                      </td>
-                    </tr>
-                    {payoutTimelineId === payout.payout_id && (
-                      <tr
-                        className="border-b bg-white"
-                        style={isPayPalPayoutWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
-                      >
-                        <td colSpan={6} className="px-6 py-5">
-                          <TimelinePanel
-                            title={`Payout Timeline · ${payout.payout_id}`}
-                            loading={payoutTimelineLoading}
-                            entries={payoutTimelineEntries}
-                          />
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {filteredPayouts.length === 0 && (
-            <div className="px-6 py-10 text-center text-sm text-gray-500">No payouts yet.</div>
-          )}
-          <PaginationControls
-            pagination={payoutPagination}
-            onPrevious={() => setPayoutPage((page) => Math.max(1, page - 1))}
-            onNext={() => setPayoutPage((page) => page + 1)}
-          />
-        </div>
+        <PayoutRecordsTable
+          busyAction={busyAction}
+          filteredPayouts={filteredPayouts}
+          handleCancelUnclaimedPayout={handleCancelUnclaimedPayout}
+          handlePayoutRefresh={handlePayoutRefresh}
+          isPayPalPayoutWorkspace={isPayPalPayoutWorkspace}
+          onNextPage={() => setPayoutPage((page) => page + 1)}
+          onOpenDetail={(payout) => setDetailDrawer({ type: 'payout', id: payout.payout_id })}
+          onPreviousPage={() => setPayoutPage((page) => Math.max(1, page - 1))}
+          payoutPagination={payoutPagination}
+          payoutTimelineEntries={payoutTimelineEntries}
+          payoutTimelineId={payoutTimelineId}
+          payoutTimelineLoading={payoutTimelineLoading}
+          togglePayoutTimeline={togglePayoutTimeline}
+        />
         </div>
       ) : null}
 

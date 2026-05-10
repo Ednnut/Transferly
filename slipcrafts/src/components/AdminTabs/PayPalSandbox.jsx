@@ -1,6 +1,6 @@
 import { Activity, ChevronRight, FileText, Home, Plus, RotateCcw, Send, Wallet } from 'lucide-react';
-import { DetailRow, StatusPill } from './AdminPaymentsTab.components';
-import { PAYPAL_BRAND, formatCents, formatCurrencyMajor, getTopUpOrderTone } from './AdminPaymentsTab.utils';
+import { DetailRow, StatusPill } from './PaymentsParts';
+import { PAYPAL_BRAND, formatCents, formatCurrencyMajor, getTopUpOrderTone } from './paymentsUtils';
 
 const PAYOUT_SANDBOX_ACTIVITY_LINKS = ['All Transactions', 'All Reports', 'Business Overview'];
 

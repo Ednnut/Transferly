@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
   Clock3,
+  Eye,
   ExternalLink,
   MessageSquare,
   QrCode,
@@ -12,7 +13,7 @@ import {
   Wallet,
   X
 } from 'lucide-react';
-import { PAYPAL_BRAND, formatCents, formatDateTime } from './AdminPaymentsTab.utils';
+import { PAYPAL_BRAND, formatCents, formatDateTime } from './paymentsUtils';
 
 export function DetailRow({ label, value }) {
   return (
@@ -754,6 +755,302 @@ export function PayoutComposerSection({
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+export function InvoiceRecordsTable({
+  busyAction,
+  filteredInvoices,
+  generateInvoiceQr,
+  handleInvoiceAction,
+  handleInvoiceCancel,
+  handleInvoiceReminderCancellation,
+  handleMarkInvoiceReviewRequired,
+  invoicePagination,
+  invoiceTimelineEntries,
+  invoiceTimelineId,
+  invoiceTimelineLoading,
+  isPayPalInvoiceWorkspace,
+  onNextPage,
+  onOpenDetail,
+  onPreviousPage,
+  refreshInvoice,
+  sendInvoiceReminder,
+  toggleInvoiceTimeline
+}) {
+  return (
+    <div
+      className="overflow-hidden rounded-2xl border bg-white shadow-sm"
+      style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border, boxShadow: '0 18px 40px rgba(0,48,135,0.06)' } : undefined}
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px]">
+          <thead
+            className="border-b bg-gray-50"
+            style={
+              isPayPalInvoiceWorkspace
+                ? {
+                    borderColor: PAYPAL_BRAND.border,
+                    background: 'linear-gradient(180deg, rgba(0,48,135,0.06), rgba(244,248,255,1))'
+                  }
+                : undefined
+            }
+          >
+            <tr>
+              {['Invoice', 'Recipient', 'Amount', 'Status', 'Official PayPal', 'Actions'].map((heading) => (
+                <th key={heading} className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  {heading}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filteredInvoices.map((invoice) => (
+              <Fragment key={invoice.internal_invoice_id}>
+                <tr
+                  className="border-b align-top hover:bg-gray-50"
+                  style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
+                >
+                  <td className="px-6 py-4">
+                    <div
+                      className="font-semibold text-gray-900"
+                      style={isPayPalInvoiceWorkspace ? { color: PAYPAL_BRAND.ink } : undefined}
+                    >
+                      {invoice.summary.invoice_number}
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500">{invoice.invoice_id}</div>
+                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-700">{invoice.summary.recipient_email}</td>
+                  <td className="px-6 py-4 text-sm font-semibold text-gray-900">
+                    {invoice.summary.amount} {invoice.summary.currency}
+                  </td>
+                  <td className="px-6 py-4">
+                    <StatusPill
+                      value={invoice.status}
+                      tone={invoice.status === 'PAID' ? 'green' : invoice.status === 'FAILED' ? 'red' : 'blue'}
+                    />
+                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-600">
+                    <div>Issue Date: {invoice.summary.issue_date || 'Immediate send'}</div>
+                    <div className="mt-1">Due: {invoice.summary.due_date || 'Not set'}</div>
+                    <div className="mt-1">Synced: {formatDateTime(invoice.official_paypal?.last_synced_at)}</div>
+                    <div className="mt-1">
+                      QR: {invoice.official_paypal?.qr?.image_url_png ? 'Ready' : 'Not generated'}
+                    </div>
+                    <div className="mt-1">
+                      Auto reminders: {invoice.summary.auto_reminders_cancelled_at ? 'Stopped' : 'Active'}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4">
+                    <button
+                      onClick={() => onOpenDetail(invoice)}
+                      className="mb-2 inline-flex items-center gap-1 rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50"
+                    >
+                      <Eye size={14} />
+                      Details
+                    </button>
+                    <InvoiceActions
+                      invoice={invoice}
+                      busyAction={busyAction}
+                      onRefresh={(item) =>
+                        handleInvoiceAction('refresh', item, refreshInvoice, 'Invoice refreshed')
+                      }
+                      onReminder={(item) =>
+                        handleInvoiceAction('remind', item, sendInvoiceReminder, 'Reminder sent')
+                      }
+                      onCancelReminders={handleInvoiceReminderCancellation}
+                      onQr={(item) =>
+                        handleInvoiceAction('qr', item, generateInvoiceQr, 'Official PayPal QR generated')
+                      }
+                      onCancel={handleInvoiceCancel}
+                      onReviewRequired={handleMarkInvoiceReviewRequired}
+                      onTimelineToggle={toggleInvoiceTimeline}
+                      timelineOpen={invoiceTimelineId === invoice.internal_invoice_id}
+                    />
+                  </td>
+                </tr>
+                {invoiceTimelineId === invoice.internal_invoice_id && (
+                  <tr
+                    className="border-b bg-white"
+                    style={isPayPalInvoiceWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
+                  >
+                    <td colSpan={6} className="px-6 py-5">
+                      <TimelinePanel
+                        title={`Invoice Timeline · ${invoice.summary.invoice_number}`}
+                        loading={invoiceTimelineLoading}
+                        entries={invoiceTimelineEntries}
+                      />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {filteredInvoices.length === 0 && (
+        <div className="px-6 py-10 text-center text-sm text-gray-500">No invoices yet.</div>
+      )}
+      <PaginationControls
+        pagination={invoicePagination}
+        onPrevious={onPreviousPage}
+        onNext={onNextPage}
+      />
+    </div>
+  );
+}
+
+export function PayoutRecordsTable({
+  busyAction,
+  filteredPayouts,
+  handleCancelUnclaimedPayout,
+  handlePayoutRefresh,
+  isPayPalPayoutWorkspace,
+  onNextPage,
+  onOpenDetail,
+  onPreviousPage,
+  payoutPagination,
+  payoutTimelineEntries,
+  payoutTimelineId,
+  payoutTimelineLoading,
+  togglePayoutTimeline
+}) {
+  return (
+    <div
+      className="overflow-hidden rounded-2xl border bg-white shadow-sm"
+      style={isPayPalPayoutWorkspace ? { borderColor: PAYPAL_BRAND.border, boxShadow: '0 18px 40px rgba(0,48,135,0.06)' } : undefined}
+    >
+      <div className="overflow-x-auto">
+        <table className={`w-full ${isPayPalPayoutWorkspace ? 'min-w-[860px]' : 'min-w-[1040px]'}`}>
+          <thead
+            className="border-b bg-gray-50"
+            style={
+              isPayPalPayoutWorkspace
+                ? {
+                    borderColor: PAYPAL_BRAND.border,
+                    backgroundColor: PAYPAL_BRAND.shell
+                  }
+                : undefined
+            }
+          >
+            <tr>
+              {['Payout', 'Receiver', 'Amount', 'Risk', 'Provider State', 'Actions'].map((heading) => (
+                <th key={heading} className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  {heading}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filteredPayouts.map((payout) => (
+              <Fragment key={payout.payout_id}>
+                <tr
+                  className="border-b align-top hover:bg-gray-50"
+                  style={isPayPalPayoutWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
+                >
+                  <td className="px-6 py-4">
+                    <div
+                      className="font-semibold text-gray-900"
+                      style={isPayPalPayoutWorkspace ? { color: PAYPAL_BRAND.ink } : undefined}
+                    >
+                      {payout.payout_id}
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500">
+                      Batch: {payout.tracking.sender_batch_id || 'Pending'}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-700">{payout.summary.receiver}</td>
+                  <td className="px-6 py-4 text-sm font-semibold text-gray-900">
+                    {payout.summary.amount} {payout.summary.currency}
+                  </td>
+                  <td className="px-6 py-4">
+                    <StatusPill
+                      value={payout.risk_decision}
+                      tone={
+                        payout.risk_decision === 'APPROVED'
+                          ? 'green'
+                          : payout.risk_decision === 'BLOCKED'
+                            ? 'red'
+                            : 'amber'
+                      }
+                    />
+                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-600">
+                    <div className="flex items-center gap-2">
+                      <StatusPill
+                        value={payout.status}
+                        tone={
+                          payout.status === 'SUCCESS'
+                            ? 'green'
+                            : payout.status === 'FAILED' || payout.status === 'DENIED'
+                              ? 'red'
+                              : 'blue'
+                        }
+                      />
+                    </div>
+                    <div className="mt-2 text-xs text-gray-500">
+                      Provider item: {payout.official_paypal?.provider_item_status || payout.metadata?.provider_item_status || 'Unknown'}
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500">
+                      Synced: {formatDateTime(payout.official_paypal?.last_synced_at || payout.metadata?.last_synced_at)}
+                    </div>
+                    {payout.official_paypal?.provider_issue_code && (
+                      <div className="mt-1 text-xs text-amber-700">
+                        Issue code: {payout.official_paypal.provider_issue_code}
+                      </div>
+                    )}
+                    {payout.official_paypal?.remediation?.reason && (
+                      <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        {payout.official_paypal.remediation.reason}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-6 py-4">
+                    <button
+                      onClick={() => onOpenDetail(payout)}
+                      className="mb-2 inline-flex items-center gap-1 rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50"
+                    >
+                      <Eye size={14} />
+                      Details
+                    </button>
+                    <PayoutActions
+                      payout={payout}
+                      busyAction={busyAction}
+                      onRefresh={handlePayoutRefresh}
+                      onCancelUnclaimed={handleCancelUnclaimedPayout}
+                      onTimelineToggle={togglePayoutTimeline}
+                      timelineOpen={payoutTimelineId === payout.payout_id}
+                    />
+                  </td>
+                </tr>
+                {payoutTimelineId === payout.payout_id && (
+                  <tr
+                    className="border-b bg-white"
+                    style={isPayPalPayoutWorkspace ? { borderColor: PAYPAL_BRAND.border } : undefined}
+                  >
+                    <td colSpan={6} className="px-6 py-5">
+                      <TimelinePanel
+                        title={`Payout Timeline · ${payout.payout_id}`}
+                        loading={payoutTimelineLoading}
+                        entries={payoutTimelineEntries}
+                      />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {filteredPayouts.length === 0 && (
+        <div className="px-6 py-10 text-center text-sm text-gray-500">No payouts yet.</div>
+      )}
+      <PaginationControls
+        pagination={payoutPagination}
+        onPrevious={onPreviousPage}
+        onNext={onNextPage}
+      />
     </div>
   );
 }

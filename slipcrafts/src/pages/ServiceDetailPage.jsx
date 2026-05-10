@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Activity, ArrowLeft, ArrowRight, Clock3, ExternalLink, FileText, Layers3, Send, Sparkles, Wallet } from 'lucide-react';
 import { Link, Navigate, useParams, useSearchParams } from 'react-router-dom';
-import AdminPaymentsTab from '../components/AdminTabs/AdminPaymentsTab';
+import AdminPaymentsTab from '../components/AdminTabs/PaymentsTab';
 import DashboardLayout from '../components/DashboardLayout';
 import { useAppContext } from '../context/AppContext';
 import ServiceLogo from '../components/ServiceLogo';

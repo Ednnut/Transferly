@@ -39,6 +39,8 @@ import toast from 'react-hot-toast';
 import MiniAppShell from '../components/MiniAppShell';
 import { SessionHealthStrip, TelegramLaunchNotice } from '../components/miniapp/MiniAppSessionStatus';
 import ServiceLogo from '../components/ServiceLogo';
+import ProviderRegistryProvider from '../providers/ProviderRegistry';
+import paypalProvider from '../providers/paypal';
 // Lazy-load heavy miniapp sections and feature components for route-based code-splitting
 const MiniAppPointsWallet = lazy(() => import('../components/MiniAppPointsWallet'));
 const MiniAppReceiptStudio = lazy(() => import('../components/MiniAppReceiptStudio'));
@@ -822,7 +824,9 @@ function HeroPanel({ profile, telegram, receipts, topUpOrders }) {
   }, []);
 
   return (
-    <section className="space-y-4 miniapp-enter">
+    <ProviderRegistryProvider initialProviders={[paypalProvider]}>
+          </section>
+    </ProviderRegistryProvider>
       <div className="miniapp-command-hero relative overflow-hidden rounded-[32px] border border-[var(--miniapp-border-color)] p-5 text-white shadow-[0_28px_80px_rgba(0,0,0,0.34)] sm:p-6">
         <div className="pointer-events-none absolute bottom-0 left-1/2 h-px w-2/3 -translate-x-1/2 bg-gradient-to-r from-transparent via-white/30 to-transparent" />
 

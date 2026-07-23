@@ -250,13 +250,10 @@ export default function DashboardPage() {
               <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 {/* Stats moved above - can remove this section or repurpose */}
               </div>
-
-              </div>
             </div>
           </div>
 
-
-              <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
+          <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
                 <div className="rounded-[24px] bg-gradient-to-br from-slate-900 to-slate-800 p-6 text-white hover:shadow-lg-glass transition-all duration-300">
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="text-2xl font-black tracking-tight">Quick Actions</h2>

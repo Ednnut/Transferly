@@ -9,7 +9,7 @@ test('lazy-load finance chunk and show loading fallback when navigating', async 
       if (/MiniAppFinanceSuite|ProviderWorkspaceFoundation|MiniAppPointsWallet|MiniAppReceiptStudio|MiniAppReceiptVault/.test(url)) {
         loaded.push(url);
       }
-    } catch (e) {}
+    } catch (e) { if (!process.env.CI) console.debug(e); }
   });
 
   await page.goto('/');

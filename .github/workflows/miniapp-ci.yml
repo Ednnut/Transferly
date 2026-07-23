@@ -38,11 +38,24 @@ jobs:
       - name: Install miniapp dependencies
         run: npm ci --prefix miniapp
 
+      - name: Run npm audit (fail on high)
+        run: npm audit --prefix miniapp --audit-level=high
+
+      - name: Lint miniapp
+        run: npm run lint --prefix miniapp
+
       - name: Build miniapp
         run: npm run build --prefix miniapp
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps
+
+      - name: Serve built miniapp for Lighthouse
+        run: npx http-server miniapp/dist -p 5000 &
+
+      - name: Run Lighthouse (performance & accessibility)
+        run: |
+          npx -y lighthouse http://localhost:5000 --output=json --output-path=miniapp/lighthouse.json --quiet || true
 
       - name: Run Playwright tests
         run: npm run test:e2e --prefix miniapp
@@ -55,6 +68,7 @@ jobs:
         with:
           name: miniapp-playwright-report
           path: miniapp/playwright-report/**
+          retention-days: 30
 
       - name: Upload Playwright videos/screenshots (if present)
         if: always()
@@ -62,3 +76,12 @@ jobs:
         with:
           name: miniapp-playwright-artifacts
           path: miniapp/**/test-results/**
+          retention-days: 30
+
+      - name: Upload Lighthouse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miniapp-lighthouse
+          path: miniapp/lighthouse.json
+          retention-days: 30

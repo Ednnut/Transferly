@@ -1,28 +1,24 @@
-module.exports = {
-  root: true,
-  env: {
-    browser: true,
-    es2021: true,
-    node: true
+const js = require('@eslint/js');
+const reactPlugin = require('eslint-plugin-react');
+
+module.exports = [
+  {
+    ignores: ['node_modules', 'dist', '.vite']
   },
-  extends: [
-    'eslint:recommended',
-    'plugin:react/recommended',
-    'prettier'
-  ],
-  parserOptions: {
-    ecmaVersion: 'latest',
-    sourceType: 'module',
-    ecmaFeatures: {
-      jsx: true
+  {
+    files: ['**/*.js', '**/*.jsx'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: {
+        console: 'readonly',
+        process: 'readonly'
+      }
+    },
+    rules: {
+      ...js.configs.recommended.rules,
+      ...reactPlugin.configs.recommended.rules,
+      'react/react-in-jsx-scope': 'off'
     }
-  },
-  settings: {
-    react: {
-      version: 'detect'
-    }
-  },
-  rules: {
-    'react/react-in-jsx-scope': 'off'
   }
-};
+];

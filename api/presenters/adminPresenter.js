@@ -25,13 +25,23 @@ function presentAdminPayout(payout) {
 }
 
 function presentAdminUser(user) {
+  const ledgerBalance = user.pointBalance?.ledgerBalance ?? user.points ?? 0;
+  const projectionBalance = user.pointBalance?.projectionBalance ?? ledgerBalance;
+  const difference = user.pointBalance?.difference ?? projectionBalance - ledgerBalance;
+
   return {
     user_id: user.id,
     email: user.email,
     name: user.name || user.displayName || '',
     display_name: user.displayName || null,
     country_code: user.countryCode || null,
-    points: user.points ?? 0,
+    points: ledgerBalance,
+    point_balance: {
+      ledger_balance: ledgerBalance,
+      projection_balance: projectionBalance,
+      difference,
+      reconciled: user.pointBalance?.reconciled ?? (difference === 0)
+    },
     referral_count: user.referral_count ?? 0,
     referral_code: user.referral_code ?? null,
     is_admin: Boolean(user.is_admin),
@@ -59,10 +69,77 @@ function presentRiskFlag(flag) {
   };
 }
 
+const webhookProviderSlugs = ['paypal', 'stripe', 'crypto', 'paystack', 'flutterwave', 'wise'];
+
+function inferWebhookProvider(event) {
+  const payloadProvider = event.payload?.provider;
+  if (payloadProvider && webhookProviderSlugs.includes(String(payloadProvider).toLowerCase())) {
+    return String(payloadProvider).toLowerCase();
+  }
+
+  const eventId = String(event.eventId || '').toLowerCase();
+  const prefixedProvider = webhookProviderSlugs.find((provider) => eventId.startsWith(`${provider}:`));
+  if (prefixedProvider) {
+    return prefixedProvider;
+  }
+
+  const eventText = [
+    event.eventType,
+    event.resourceType,
+    event.payload?.type,
+    event.payload?.event_type
+  ].join(' ').toLowerCase();
+  const textProvider = webhookProviderSlugs.find((provider) => eventText.includes(provider));
+
+  return textProvider || 'paypal';
+}
+
+function summarizeWebhookPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') {
+    return {
+      has_payload: false
+    };
+  }
+
+  const resource = payload.resource || payload.data?.object || payload.data || {};
+
+  return {
+    has_payload: true,
+    id: payload.id || null,
+    type: payload.type || payload.event_type || null,
+    provider: payload.provider || null,
+    resource_id: resource.id || payload.resource_id || null,
+    resource_type: resource.object || payload.resource_type || null,
+    top_level_keys: Object.keys(payload).slice(0, 20)
+  };
+}
+
+function summarizeWebhookVerification(verificationPayload = {}) {
+  if (!verificationPayload || typeof verificationPayload !== 'object') {
+    return {
+      has_verification_payload: false
+    };
+  }
+
+  return {
+    has_verification_payload: true,
+    verification_status: verificationPayload.verification_status || verificationPayload.status || null,
+    signature_header_present: Boolean(
+      verificationPayload.signature_header_present ||
+        verificationPayload.stripe_signature_present ||
+        verificationPayload.coinbase_signature_present
+    ),
+    transmission_id_present: Boolean(verificationPayload.transmission_id || verificationPayload.transmissionId)
+  };
+}
+
 function presentWebhookEvent(event) {
+  const provider = inferWebhookProvider(event);
+
   return {
     webhook_event_id: event.id,
     event_id: event.eventId,
+    provider,
     event_type: event.eventType,
     resource_type: event.resourceType,
     transmission_id: event.transmissionId,
@@ -72,6 +149,18 @@ function presentWebhookEvent(event) {
     processed_at: event.processedAt || null,
     created_at: event.createdAt,
     updated_at: event.updatedAt
+  };
+}
+
+function presentWebhookEventDetail(event) {
+  const status = String(event.status || '').toUpperCase();
+
+  return {
+    ...presentWebhookEvent(event),
+    can_replay: status !== 'REJECTED',
+    can_ignore: !['IGNORED', 'PROCESSED'].includes(status),
+    sanitized_payload: summarizeWebhookPayload(event.payload),
+    verification: summarizeWebhookVerification(event.verificationPayload)
   };
 }
 
@@ -107,13 +196,42 @@ function presentQueueOverview(overview) {
 function presentDeadLetterJob(job) {
   return {
     job_id: job.job_id,
+    queue_job_id: job.queue_job_id || null,
+    record_id: job.record_id || null,
     name: job.name,
     attempts_made: job.attempts_made,
     failed_reason: job.failed_reason,
+    failure_code: job.failure_code || null,
+    failure_classification: job.failure_classification || null,
+    retryable: typeof job.retryable === 'boolean' ? job.retryable : null,
+    status: job.status || null,
     queue_name: job.queue_name,
+    source_queue: job.source_queue || null,
+    source_job_id: job.source_job_id || null,
+    correlation_id: job.correlation_id || null,
+    recovery: job.recovery || null,
     data: job.data,
     created_at: job.created_at,
     finished_at: job.finished_at
+  };
+}
+
+function presentProviderHealthReport(report) {
+  return {
+    generated_at: report.generated_at,
+    data: report.data.map((provider) => ({
+      provider: provider.provider,
+      display_name: provider.display_name,
+      provider_status: provider.provider_status,
+      score: provider.score,
+      status: provider.status,
+      failed_webhooks: provider.failed_webhooks,
+      recent_webhooks: provider.recent_webhooks,
+      unresolved_issues: provider.unresolved_issues,
+      last_webhook_at: provider.last_webhook_at,
+      reasons: provider.reasons || [],
+      next_actions: provider.next_actions || []
+    }))
   };
 }
 
@@ -182,7 +300,9 @@ module.exports = {
   presentPaymentOpsIssue,
   presentRiskFlag,
   presentWebhookEvent,
+  presentWebhookEventDetail,
   presentFundRelease,
+  presentProviderHealthReport,
   presentQueueOverview,
   presentDeadLetterJob
 };

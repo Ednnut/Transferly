@@ -1,18 +1,35 @@
 const { Worker } = require('bullmq');
 
+const config = require('../config');
 const { close, initializeDatabase } = require('../db');
 const {
+  assetCleanupQueue,
   deadLetterQueue,
   payoutRetryQueue,
+  pointReservationExpiryQueue,
   queueNames,
   redisConnection
 } = require('./queues');
 const {
+  createCleanupExpiredAssetJob,
+  registerExpiredAssetCleanupSchedule
+} = require('./cleanupExpiredAssetJob');
+const {
+  createExpirePointReservationJob,
+  registerPointReservationExpirySchedule
+} = require('./expirePointReservationJob');
+const {
   RETRY_DELAYS_MS,
+  classifyWorkerFailure,
+  createClassifiedJobProcessor,
+  createOrderJobProcessor,
   createPayoutJobProcessor,
   createWorkerFailureHandler
 } = require('./workerHelpers');
 const { logger } = require('../utils/logger');
+const { assetStorageService } = require('../services/assetStorageService');
+const { deadLetterService } = require('../services/deadLetterService');
+const { orderService } = require('../services/orderService');
 const { providerInvoiceService } = require('../services/providerInvoiceService');
 const { paymentReconciliationService } = require('../services/paymentReconciliationService');
 const { payoutProcessingService } = require('../services/payoutProcessingService');
@@ -20,7 +37,20 @@ const { webhookService } = require('../services/webhookService');
 
 const invoiceWorker = new Worker(
   queueNames.invoiceSend,
-  async (job) => providerInvoiceService.createAndSendInvoice(job.data),
+  createClassifiedJobProcessor(async (job) => providerInvoiceService.createAndSendInvoice(job.data)),
+  {
+    connection: redisConnection,
+    concurrency: 2
+  }
+);
+
+const orderWorker = new Worker(
+  queueNames.orderProcess,
+  createClassifiedJobProcessor(
+    createOrderJobProcessor({
+      orderService
+    })
+  ),
   {
     connection: redisConnection,
     concurrency: 2
@@ -29,11 +59,13 @@ const invoiceWorker = new Worker(
 
 const payoutWorker = new Worker(
   queueNames.payoutProcess,
-  createPayoutJobProcessor({
-    payoutService: payoutProcessingService,
-    retryQueue: payoutRetryQueue,
-    retryDelayMs: RETRY_DELAYS_MS.initialPayoutPoll
-  }),
+  createClassifiedJobProcessor(
+    createPayoutJobProcessor({
+      payoutService: payoutProcessingService,
+      retryQueue: payoutRetryQueue,
+      retryDelayMs: RETRY_DELAYS_MS.initialPayoutPoll
+    })
+  ),
   {
     connection: redisConnection,
     concurrency: 2
@@ -42,11 +74,13 @@ const payoutWorker = new Worker(
 
 const payoutRetryWorker = new Worker(
   queueNames.payoutRetry,
-  createPayoutJobProcessor({
-    payoutService: payoutProcessingService,
-    retryQueue: payoutRetryQueue,
-    retryDelayMs: RETRY_DELAYS_MS.followUpPayoutPoll
-  }),
+  createClassifiedJobProcessor(
+    createPayoutJobProcessor({
+      payoutService: payoutProcessingService,
+      retryQueue: payoutRetryQueue,
+      retryDelayMs: RETRY_DELAYS_MS.followUpPayoutPoll
+    })
+  ),
   {
     connection: redisConnection,
     concurrency: 1
@@ -55,7 +89,7 @@ const payoutRetryWorker = new Worker(
 
 const webhookWorker = new Worker(
   queueNames.webhookProcess,
-  async (job) => webhookService.processWebhookEvent(job.data.webhookEventId),
+  createClassifiedJobProcessor(async (job) => webhookService.processWebhookEvent(job.data.webhookEventId)),
   {
     connection: redisConnection,
     concurrency: 2
@@ -64,7 +98,36 @@ const webhookWorker = new Worker(
 
 const reconciliationWorker = new Worker(
   queueNames.reconciliation,
-  async (job) => paymentReconciliationService.runPaymentReconciliation(job.data),
+  createClassifiedJobProcessor(async (job) => paymentReconciliationService.runPaymentReconciliation(job.data)),
+  {
+    connection: redisConnection,
+    concurrency: 1
+  }
+);
+
+const assetCleanupWorker = new Worker(
+  queueNames.assetCleanup,
+  createClassifiedJobProcessor(
+    createCleanupExpiredAssetJob({
+      assetStorageService,
+      batchSize: config.GENERATED_ASSET_CLEANUP_BATCH_SIZE,
+      reconcileOrphans: config.GENERATED_ASSET_ORPHAN_DELETE_ENABLED
+    })
+  ),
+  {
+    connection: redisConnection,
+    concurrency: 1
+  }
+);
+
+const pointReservationExpiryWorker = new Worker(
+  queueNames.pointReservationExpiry,
+  createClassifiedJobProcessor(
+    createExpirePointReservationJob({
+      orderService,
+      batchSize: config.POINT_RESERVATION_EXPIRY_BATCH_SIZE
+    })
+  ),
   {
     connection: redisConnection,
     concurrency: 1
@@ -73,29 +136,70 @@ const reconciliationWorker = new Worker(
 
 for (const [queueName, worker] of [
   [queueNames.invoiceSend, invoiceWorker],
+  [queueNames.orderProcess, orderWorker],
   [queueNames.payoutProcess, payoutWorker],
   [queueNames.payoutRetry, payoutRetryWorker],
   [queueNames.webhookProcess, webhookWorker],
-  [queueNames.reconciliation, reconciliationWorker]
+  [queueNames.reconciliation, reconciliationWorker],
+  [queueNames.assetCleanup, assetCleanupWorker],
+  [queueNames.pointReservationExpiry, pointReservationExpiryWorker]
 ]) {
   worker.on(
     'failed',
     createWorkerFailureHandler({
       queueName,
-      deadLetterQueue
+      deadLetterQueue,
+      deadLetterHandler: (job, error) => deadLetterService.recordExhaustedJob({
+        queueName,
+        deadLetterQueue,
+        job,
+        error
+      }),
+      onExhausted:
+        queueName === queueNames.orderProcess
+          ? async (job, error) => {
+            const failure = classifyWorkerFailure(error);
+            return orderService.markOrderFailed({
+              orderId: job.data.orderId,
+              dispatchGeneration: job.data.dispatchGeneration,
+              failureCode: failure.retryable ? 'ORDER_JOB_EXHAUSTED' : 'ORDER_JOB_TERMINAL',
+              failureMessage: error.message,
+              actorId: 'order-worker',
+              reason: failure.retryable ? 'worker_attempts_exhausted' : 'worker_terminal_failure',
+              metadata: {
+                sourceJobId: job.id || null,
+                sourceQueue: queueName,
+                correlationId: job.data.correlationId || job.id || null,
+                queueAttempts: job.attemptsMade || null,
+                failureClassification: failure.classification
+              }
+            });
+          }
+          : null
     })
   );
 }
 
 async function bootstrap() {
   await initializeDatabase();
+  await registerExpiredAssetCleanupSchedule(assetCleanupQueue, {
+    intervalMs: config.GENERATED_ASSET_CLEANUP_INTERVAL_MS,
+    batchSize: config.GENERATED_ASSET_CLEANUP_BATCH_SIZE
+  });
+  await registerPointReservationExpirySchedule(pointReservationExpiryQueue, {
+    intervalMs: config.POINT_RESERVATION_EXPIRY_INTERVAL_MS,
+    batchSize: config.POINT_RESERVATION_EXPIRY_BATCH_SIZE
+  });
 
   await Promise.all([
     invoiceWorker.waitUntilReady(),
+    orderWorker.waitUntilReady(),
     payoutWorker.waitUntilReady(),
     payoutRetryWorker.waitUntilReady(),
     webhookWorker.waitUntilReady(),
-    reconciliationWorker.waitUntilReady()
+    reconciliationWorker.waitUntilReady(),
+    assetCleanupWorker.waitUntilReady(),
+    pointReservationExpiryWorker.waitUntilReady()
   ]);
 
   logger.info('Workers are ready.');
@@ -104,10 +208,13 @@ async function bootstrap() {
 async function shutdown() {
   await Promise.all([
     invoiceWorker.close(),
+    orderWorker.close(),
     payoutWorker.close(),
     payoutRetryWorker.close(),
     webhookWorker.close(),
-    reconciliationWorker.close()
+    reconciliationWorker.close(),
+    assetCleanupWorker.close(),
+    pointReservationExpiryWorker.close()
   ]);
   await redisConnection.quit();
   await close();

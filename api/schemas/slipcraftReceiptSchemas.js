@@ -7,6 +7,7 @@ const detailFieldSchema = z.object({
 
 const generateReceiptSchema = z.object({
   userId: z.string().trim().min(1).optional(),
+  serviceSlug: z.string().trim().min(1).max(80).optional(),
   type: z.enum(['bank', 'email']).default('bank'),
   title: z.string().trim().min(1).max(160).optional(),
   summary: z.string().trim().min(1).max(240).optional(),

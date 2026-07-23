@@ -1,10 +1,12 @@
 const { transaction } = require('../db');
+const { randomUUID } = require('node:crypto');
 const { platformConfigRepository } = require('../repositories/platformConfigRepository');
-const { pointTransactionRepository } = require('../repositories/pointTransactionRepository');
-const { profileRepository } = require('../repositories/profileRepository');
 const { receiptRepository } = require('../repositories/receiptRepository');
+const { serviceRepository } = require('../repositories/serviceRepository');
 const { userRepository } = require('../repositories/userRepository');
 const { auditLogService } = require('./auditLogService');
+const { pointLedgerService } = require('./pointLedgerService');
+const { pointReservationService } = require('./pointReservationService');
 const {
   AUDIT_ACTOR_TYPE,
   POINT_TRANSACTION_TYPE,
@@ -12,6 +14,7 @@ const {
   RECEIPT_TYPE
 } = require('../utils/constants');
 const { AppError } = require('../utils/errors');
+const { SANDBOX_REQUIRED_MARKINGS } = require('../constants/serviceCatalogue');
 const { buildReceiptArtifacts } = require('../utils/simplePdf');
 
 const LABEL_TOKEN_OVERRIDES = new Map([
@@ -61,8 +64,74 @@ function buildSummaryText(user, input) {
   return `Generated for ${user.profile?.name || user.email} (${input.type} receipt).`;
 }
 
+function resolveServiceSlug(input) {
+  return String(input.serviceSlug || input.details?.service || '').trim().toLowerCase();
+}
+
+async function requireSandboxReceiptService(input, client) {
+  const serviceSlug = resolveServiceSlug(input);
+  const service = serviceSlug
+    ? await serviceRepository.findAvailableBySlug(serviceSlug, client)
+    : null;
+
+  if (
+    !service ||
+    service.status !== 'sandbox' ||
+    service.executionMode !== 'sandbox' ||
+    service.metadata?.legacyReceiptGeneration !== true
+  ) {
+    throw new AppError(
+      410,
+      'LEGACY_RECEIPT_GENERATION_DISABLED',
+      'Direct receipt generation is available only for permanently labeled sandbox test data.'
+    );
+  }
+
+  const configuredMarkings = Array.isArray(service.metadata?.requiredMarkings)
+    ? service.metadata.requiredMarkings
+    : [];
+  const hasRequiredMarkings = SANDBOX_REQUIRED_MARKINGS.every((marking) =>
+    configuredMarkings.includes(marking)
+  );
+  if (!hasRequiredMarkings) {
+    throw new AppError(
+      503,
+      'SANDBOX_MARKINGS_NOT_CONFIGURED',
+      'Sandbox receipt generation is unavailable because its required safety markings are incomplete.'
+    );
+  }
+
+  return service;
+}
+
+function buildSandboxContent(user, input, service) {
+  const originalTitle = input.title || `${String(input.type).toUpperCase()} Test Record`;
+  const originalSummary = buildSummaryText(user, input);
+  const details = {
+    ...(input.details || {}),
+    service: service.slug,
+    sandbox: true,
+    required_markings: SANDBOX_REQUIRED_MARKINGS
+  };
+  const fields = [
+    ...SANDBOX_REQUIRED_MARKINGS.map((marking) => ({
+      label: 'Safety Marking',
+      value: marking
+    })),
+    ...buildFields(details, input.fields)
+  ];
+
+  return {
+    details,
+    fields,
+    summaryText: `${SANDBOX_REQUIRED_MARKINGS.join(' | ')} | ${originalSummary}`,
+    title: `${SANDBOX_REQUIRED_MARKINGS[0]} - ${originalTitle}`
+  };
+}
+
 async function generateReceipt(input) {
   return transaction(async (client) => {
+    const service = await requireSandboxReceiptService(input, client);
     const user = await userRepository.findById(input.userId, client);
     if (!user) {
       throw new AppError(404, 'USER_NOT_FOUND', 'User not found.');
@@ -72,17 +141,35 @@ async function generateReceipt(input) {
     const costPoints =
       input.type === RECEIPT_TYPE.EMAIL ? platformConfig.email_receipt_cost : platformConfig.bank_slip_cost;
 
-    if ((user.profile?.points ?? 0) < costPoints) {
+    const availablePoints = await pointLedgerService.getBalance(input.userId, client);
+    if (availablePoints < costPoints) {
       throw new AppError(400, 'INSUFFICIENT_POINTS', 'Not enough points to generate this receipt.');
     }
 
-    const title = input.title || `${platformConfig.platform_name} ${String(input.type).toUpperCase()} Receipt`;
-    const fields = buildFields(input.details, input.fields);
-    const summaryText = buildSummaryText(user, input);
-    const artifacts = buildReceiptArtifacts(title, summaryText, fields, input.details || {});
+    const { details, fields, summaryText, title } = buildSandboxContent(user, input, service);
+    const artifacts = buildReceiptArtifacts(title, summaryText, fields, details);
+    const receiptId = input.receiptId || randomUUID();
+    const pointReservation = await pointReservationService.reservePoints(
+      {
+        reservationKey: `receipt:${receiptId}:points`,
+        userId: input.userId,
+        amount: costPoints,
+        referenceType: 'RECEIPT',
+        referenceId: receiptId,
+        transactionType: POINT_TRANSACTION_TYPE.RECEIPT_SPEND,
+        transactionDescription: `Receipt generated: ${input.type}.`,
+        metadata: {
+          receiptType: input.type,
+          sandbox: true,
+          serviceSlug: service.slug
+        }
+      },
+      client
+    );
 
     const receipt = await receiptRepository.create(
       {
+        id: receiptId,
         userId: input.userId,
         type: input.type,
         status: RECEIPT_STATUS.GENERATED,
@@ -92,7 +179,7 @@ async function generateReceipt(input) {
         },
         data: {
           fields,
-          details: input.details || {},
+          details,
           layout: artifacts.layout
         },
         pdfBase64: artifacts.pdfBase64,
@@ -103,23 +190,10 @@ async function generateReceipt(input) {
       client
     );
 
-    await profileRepository.updateByUserId(
-      input.userId,
+    await pointReservationService.commitReservation(
       {
-        points: (user.profile?.points ?? 0) - costPoints
-      },
-      client
-    );
-
-    await pointTransactionRepository.create(
-      {
-        userId: input.userId,
-        type: POINT_TRANSACTION_TYPE.RECEIPT_SPEND,
-        amount: -costPoints,
-        description: `Receipt generated: ${receipt.type}.`,
-        metadata: {
-          receiptId: receipt.id
-        }
+        reservationId: pointReservation.id,
+        referenceId: receipt.id
       },
       client
     );
@@ -140,23 +214,29 @@ async function generateReceipt(input) {
         entityId: receipt.id,
         metadata: {
           type: input.type,
-          costPoints
+          costPoints,
+          sandbox: true,
+          serviceSlug: service.slug
         }
       },
       client
     );
 
-    const updatedUser = await userRepository.findById(input.userId, client);
+    const remainingPoints = await pointLedgerService.getBalance(input.userId, client);
 
     return {
       receipt,
       summary: {
         user_id: input.userId,
         cost_points: costPoints,
-        remaining_points: updatedUser.profile?.points ?? 0
+        remaining_points: remainingPoints
       },
       pdf_data_url: artifacts.pdfDataUrl,
-      image_data_url: artifacts.imageDataUrl
+      image_data_url: artifacts.imageDataUrl,
+      safety: {
+        mode: 'sandbox',
+        required_markings: SANDBOX_REQUIRED_MARKINGS
+      }
     };
   });
 }

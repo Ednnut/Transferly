@@ -17,6 +17,7 @@ const SECTIONS = [
     comments: ['# Transferly API the bot should call'],
     fields: [
       { key: 'API_URL', prompt: 'API URL', defaultValue: 'http://localhost:3000' },
+      { key: 'MINI_APP_URL', prompt: 'Mini App URL', defaultValue: 'https://transferly-nine.vercel.app' },
     ],
   },
   {

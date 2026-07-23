@@ -12,6 +12,21 @@ data/*.sqlite
 data/*.sqlite-*
 bot/db/*.db
 bot/db/*.db-*
-API/data/*.sqlite
-API/data/*.sqlite-*
+api/data/*.sqlite
+api/data/*.sqlite-*
+api/data/generated-assets/
 .playwright-mcp/
+
+# Local browser QA artifacts
+output/playwright/
+transferly-miniapp-*.png
+transferly-*.png
+slipcraft-*.png
+playwright-report/
+test-results/
+**/playwright-report/
+**/test-results/
+.vercel
+.env*
+!.env.example
+!**/.env.example

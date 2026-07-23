@@ -165,6 +165,16 @@ function buildFindManyWhere(filters) {
     clauses.push('p.risk_decision = ?');
     params.push(filters.riskDecision);
   }
+  if (filters.provider) {
+    const provider = String(filters.provider).toLowerCase();
+    if (provider === 'paypal') {
+      clauses.push("(p.metadata_json IS NULL OR p.metadata_json = '{}' OR lower(p.metadata_json) NOT LIKE '%\"provider\":%' OR lower(p.metadata_json) LIKE ?)");
+      params.push('%"provider":"paypal"%');
+    } else {
+      clauses.push('lower(p.metadata_json) LIKE ?');
+      params.push(`%"provider":"${provider}"%`);
+    }
+  }
   if (filters.providerState) {
     clauses.push('(lower(p.metadata_json) LIKE ? OR lower(pb.status) = ?)');
     params.push(`%"provider_item_status":"${String(filters.providerState).toLowerCase()}"%`);

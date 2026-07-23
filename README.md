@@ -1,6 +1,6 @@
-# Flashing
+# Transferly
 
-Production-grade PayPal invoicing and payouts backend built with Node.js, CommonJS, Express, SQLite, Redis, BullMQ, and Zod. The active backend package now lives entirely under `api/`, while the repo root keeps project docs and the `slipcrafts/` frontend workspace.
+Production-grade payments, invoicing, payouts, wallet, Telegram bot, and Telegram Mini App workspace built with Node.js, CommonJS, Express, SQLite, Redis, BullMQ, Zod, Vite, React, and Playwright.
 
 ## Stack
 
@@ -42,8 +42,11 @@ api/
   utils/
   webhooks/
 docs/codex/references/
-slipcrafts/
+bot/
+miniapp/
 ```
+
+See [docs/premium-roadmap.md](docs/premium-roadmap.md) for the phased premium feature roadmap covering provider operations, reconciliation, bot, mini app, risk, reporting, and production polish.
 
 The ledger remains the source of truth for balances. PayPal changes external state, but wallet values come from `wallets` plus `ledger_entries`, not from provider status alone.
 
@@ -67,19 +70,33 @@ The ledger remains the source of truth for balances. PayPal changes external sta
 
 ## Environment
 
-Copy `api/.env.example` to `api/.env` and provide real credentials.
+Copy `api/.env.example` to `api/.env` and provide real credentials. Most operational knobs already have safe development defaults in `api/config.js`, so the example file only lists the values you usually need during setup.
 
 Required variables:
 
-- `SQLITE_DATABASE_PATH`
 - `REDIS_URL`
 - `PAYPAL_CLIENT_ID`
 - `PAYPAL_CLIENT_SECRET`
-- `PAYPAL_ENVIRONMENT`
 - `PAYPAL_WEBHOOK_ID`
 
-Optional policy controls:
+Common deployment variables:
 
+- `NODE_ENV`
+- `PORT`
+- `SQLITE_DATABASE_PATH`
+- `APP_BASE_URL`
+- `FRONTEND_URL`
+- `JWT_SECRET`
+- `ADMIN_API_TOKEN`
+- `PAYPAL_ENVIRONMENT`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_WEBHOOK_SECRET`
+- `TELEGRAM_MINI_APP_URL`
+
+Optional controls:
+
+- `INLINE_QUEUE_MODE`
+- `JOB_WAIT_MS`
 - `MAX_SINGLE_PAYOUT`
 - `DAILY_PAYOUT_LIMIT`
 - `MAX_PAYOUTS_PER_HOUR`
@@ -88,10 +105,6 @@ Optional policy controls:
 - `SUSPICIOUS_INVOICE_KEYWORDS`
 - `API_RATE_LIMIT_MAX`
 - `API_RATE_LIMIT_WINDOW_MS`
-- `JOB_WAIT_MS`
-- `INLINE_QUEUE_MODE`
-- `ADMIN_API_TOKEN`
-- `ADMIN_API_ACTOR_ID`
 - `USER_API_TOKENS`
 
 Optional seed/bootstrap variables:
@@ -144,6 +157,27 @@ The API listens on `PORT` and stores SQLite data at `SQLITE_DATABASE_PATH`.
 - admin actor id `admin-demo`
 - wallet currency `USD`
 - available balance `250000` cents
+
+## PM2 Deployment
+
+The API and bot include PM2 ecosystem files for EC2-style deployments:
+
+```bash
+mkdir -p logs/api logs/bot
+pm2 start api/ecosystem.config.js --env production
+pm2 start bot/ecosystem.config.js --env production
+pm2 save
+```
+
+Run `npm install` inside `api/` and `bot/`, copy each `.env.example` to `.env`, and fill in production values before starting PM2. The API ecosystem starts both the HTTP server and the BullMQ worker; the bot ecosystem starts one Telegram bot process.
+
+For a repeatable EC2 deploy, use:
+
+```bash
+./scripts/deploy-ec2.sh
+```
+
+See [docs/deployment/ec2.md](docs/deployment/ec2.md) for the full EC2 checklist, PM2 startup setup, health checks, webhook URLs, and backup notes.
 
 ## Authentication
 

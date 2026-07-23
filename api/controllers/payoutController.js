@@ -64,8 +64,7 @@ async function createPayoutController(request, response) {
 
     const result = await dispatchPayoutProcessing(
       payout.payout_id,
-      `process-${body.provider}-payout`,
-      `process-${body.provider}-payout:${payout.payout_id}`
+      `process-${body.provider}-payout`
     );
     response.status(201).json(result);
     return;
@@ -89,8 +88,7 @@ async function createPayoutController(request, response) {
 
   const result = await dispatchPayoutProcessing(
     payout.payout_id,
-    'process-payout',
-    `process-payout:${payout.payout_id}`
+    'process-payout'
   );
   response.status(201).json(result);
 }

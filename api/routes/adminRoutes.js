@@ -24,6 +24,9 @@ const {
   getPaymentProviderBalanceController,
   getPaymentProviderInvoiceFeaturesController,
   getPaymentProviderController,
+  getAdminUserPointReconciliationController,
+  getWebhookEventController,
+  ignoreWebhookEventController,
   getQueueOverviewController,
   listAdminInvoiceTemplatesController,
   listAdminInvoicesController,
@@ -31,12 +34,15 @@ const {
   listTopUpOrdersController,
   listDeadLetterJobsController,
   listPaymentOpsIssuesController,
+  listPaymentProviderHealthController,
   listPaymentProviderInvoiceFeaturesController,
   listPaymentProvidersController,
   listStripeConnectedAccountsController,
   reopenPaymentOpsIssueController,
   runPaymentReconciliationController,
   rejectPayoutController,
+  recoverDeadLetterJobController,
+  reconcileAdminUserPointsController,
   refreshAdminInvoiceController,
   refreshStripeConnectedAccountController,
   resolvePaymentOpsIssueController,
@@ -45,6 +51,7 @@ const {
   listAdminPayoutsController,
   listRiskFlagsController,
   listWebhookEventsController,
+  replayWebhookEventController,
   updateAdminConfigController,
   updateAdminFaqController,
   updateAdminInvoiceTemplateController,
@@ -58,7 +65,23 @@ const { requireIdempotencyKey } = require('../middleware/requireIdempotencyKey')
 const router = express.Router();
 
 router.get('/users', requireAdminActor, asyncHandler(listAdminUsersController));
-router.post('/users/:id/points', requireAdminActor, asyncHandler(adjustAdminUserPointsController));
+router.get(
+  '/users/:id/points/reconciliation',
+  requireAdminActor,
+  asyncHandler(getAdminUserPointReconciliationController)
+);
+router.post(
+  '/users/:id/points/reconciliation',
+  requireAdminActor,
+  requireIdempotencyKey,
+  asyncHandler(reconcileAdminUserPointsController)
+);
+router.post(
+  '/users/:id/points',
+  requireAdminActor,
+  requireIdempotencyKey,
+  asyncHandler(adjustAdminUserPointsController)
+);
 router.get('/top-up-orders', requireAdminActor, asyncHandler(listTopUpOrdersController));
 router.post('/top-up-orders/:id/complete', requireAdminActor, asyncHandler(completeTopUpOrderController));
 router.post('/top-up-orders/:id/cancel', requireAdminActor, asyncHandler(cancelTopUpOrderController));
@@ -98,6 +121,7 @@ router.get(
   requireAdminActor,
   asyncHandler(listPaymentProviderInvoiceFeaturesController)
 );
+router.get('/payment-providers/health', requireAdminActor, asyncHandler(listPaymentProviderHealthController));
 router.get(
   '/payment-providers/:provider/invoice-features',
   requireAdminActor,
@@ -119,8 +143,13 @@ router.post('/payouts/:id/reject', requireAdminActor, asyncHandler(rejectPayoutC
 router.post('/payouts/:id/notes', requireAdminActor, asyncHandler(addPayoutNoteController));
 router.get('/risk-flags', requireAdminActor, asyncHandler(listRiskFlagsController));
 router.get('/webhooks', requireAdminActor, asyncHandler(listWebhookEventsController));
+router.get('/webhooks/:id', requireAdminActor, asyncHandler(getWebhookEventController));
+router.post('/webhooks/:id/replay', requireAdminActor, asyncHandler(replayWebhookEventController));
+router.post('/webhooks/:id/ignore', requireAdminActor, asyncHandler(ignoreWebhookEventController));
 router.get('/queues', requireAdminActor, asyncHandler(getQueueOverviewController));
 router.get('/dead-letters', requireAdminActor, asyncHandler(listDeadLetterJobsController));
+router.post('/dead-letters/:id/recover', requireAdminActor, asyncHandler(recoverDeadLetterJobController));
+router.post('/dead-letters/:id/retry', requireAdminActor, asyncHandler(recoverDeadLetterJobController));
 router.post('/reconciliation/run', requireAdminActor, asyncHandler(runPaymentReconciliationController));
 router.patch('/config', requireAdminActor, asyncHandler(updateAdminConfigController));
 router.post('/faqs', requireAdminActor, asyncHandler(createAdminFaqController));

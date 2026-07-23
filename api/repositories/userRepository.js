@@ -1,6 +1,13 @@
 const { db } = require('../db');
 const { profileRepository } = require('./profileRepository');
 const { walletRepository } = require('./walletRepository');
+const { USER_STATUS } = require('../utils/constants');
+const {
+  getRolePermissions,
+  isAdminRole,
+  isOwnerRole,
+  normalizeRole
+} = require('../utils/roles');
 
 function mapUser(row, wallet) {
   if (!row) {
@@ -8,12 +15,17 @@ function mapUser(row, wallet) {
   }
 
   const profile = row.profile || null;
+  const role = normalizeRole(profile?.role, {
+    isAdmin: profile?.is_admin ?? profile?.isAdmin
+  });
+  const isAdmin = isAdminRole(role);
 
   return {
     id: row.id,
     email: row.email,
     displayName: row.display_name,
     countryCode: row.country_code,
+    status: row.status || USER_STATUS.ACTIVE,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     created_at: row.created_at,
@@ -22,7 +34,12 @@ function mapUser(row, wallet) {
     points: profile?.points ?? 0,
     referral_count: profile?.referral_count ?? profile?.referralCount ?? 0,
     referral_code: profile?.referral_code ?? profile?.referralCode ?? null,
-    is_admin: profile?.is_admin ?? profile?.isAdmin ?? false,
+    role,
+    permissions: getRolePermissions(role),
+    isAdmin,
+    is_admin: isAdmin,
+    isOwner: isOwnerRole(role),
+    is_owner: isOwnerRole(role),
     receipt_count: row.receipt_count ?? 0,
     profile,
     wallet
@@ -81,6 +98,7 @@ async function findAll(client = db) {
         u.*,
         p.name AS profile_name,
         p.is_admin AS profile_is_admin,
+        p.role AS profile_role,
         p.points AS profile_points,
         p.referral_code AS profile_referral_code,
         p.referred_by_user_id AS profile_referred_by_user_id,
@@ -98,10 +116,12 @@ async function findAll(client = db) {
         u.email,
         u.display_name,
         u.country_code,
+        u.status,
         u.created_at,
         u.updated_at,
         p.name,
         p.is_admin,
+        p.role,
         p.points,
         p.referral_code,
         p.referred_by_user_id,
@@ -124,6 +144,7 @@ async function findAll(client = db) {
             ? {
                 userId: row.id,
                 name: row.profile_name,
+                role: row.profile_role,
                 isAdmin: Boolean(row.profile_is_admin),
                 is_admin: Boolean(row.profile_is_admin),
                 points: row.profile_points,

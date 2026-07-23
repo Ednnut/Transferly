@@ -1,18 +1,17 @@
 const config = require('../config');
 const { AppError } = require('../utils/errors');
+const { isAdminRole } = require('../utils/roles');
 
 function requireAdminActor(request, _response, next) {
-  if (config.ADMIN_AUTH_ENABLED) {
-    if (!request.auth || request.auth.role !== 'ADMIN') {
-      next(new AppError(401, 'ADMIN_AUTH_REQUIRED', 'A valid admin bearer token is required.'));
-      return;
-    }
+  if (!request.auth || !isAdminRole(request.auth.role)) {
+    next(new AppError(401, 'ADMIN_AUTH_REQUIRED', 'A valid admin bearer token is required.'));
+    return;
   }
 
   const headerActorId = request.headers['x-admin-actor-id'];
   const adminActorId =
-    (typeof headerActorId === 'string' && headerActorId) ||
-    (request.auth && request.auth.role === 'ADMIN' ? request.auth.actorId : null) ||
+    (request.auth.method === 'admin_api_token' && typeof headerActorId === 'string' && headerActorId) ||
+    request.auth.actorId ||
     config.DEFAULT_ADMIN_ACTOR_ID;
 
   if (!adminActorId) {

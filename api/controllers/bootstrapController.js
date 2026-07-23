@@ -10,7 +10,13 @@ async function getCurrentUserController(request, response) {
   response.json(result);
 }
 
+async function getCurrentUserCommandCenterController(request, response) {
+  const commandCenter = await bootstrapService.getCurrentUserCommandCenter(request.auth.userId);
+  response.json({ commandCenter });
+}
+
 module.exports = {
   getBootstrapController,
-  getCurrentUserController
+  getCurrentUserController,
+  getCurrentUserCommandCenterController
 };

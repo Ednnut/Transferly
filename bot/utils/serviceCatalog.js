@@ -1,8 +1,8 @@
 const SERVICE_GROUPS = [
   {
     id: "BANK",
-    title: "Bank Slips",
-    description: "Generate bank-transfer slip receipts.",
+    title: "Legacy Wallet Records",
+    description: "Review retired wallet-record integrations and their availability.",
     slugs: ["opay", "kuda", "palmpay"],
   },
   {
@@ -13,15 +13,13 @@ const SERVICE_GROUPS = [
   },
   {
     id: "FLASH",
-    title: "Flash Emails",
-    description: "Generate branded flash-email receipts.",
+    title: "Legacy Notifications",
+    description: "Review retired notification integrations without generating provider replicas.",
     slugs: [
       "binance",
       "bybit",
       "coinbase",
-      "paypal",
       "crypto-com",
-      "wise",
       "cash-app",
       "zelle",
       "venmo",
@@ -31,9 +29,9 @@ const SERVICE_GROUPS = [
   },
   {
     id: "CRYPTO",
-    title: "Crypto Receipts",
-    description: "Crypto-focused receipt workflows.",
-    slugs: ["crypto-receipts"],
+    title: "Transaction Records",
+    description: "Authoritative transaction records and receipt-vault review workflows.",
+    slugs: ["transaction-record", "crypto-receipts"],
   },
   {
     id: "UTILITIES",
@@ -53,36 +51,179 @@ const SERVICE_GROUPS = [
   },
 ];
 
+const AVAILABLE_SERVICE_STATUSES = new Set(["active", "sandbox"]);
+
 const SERVICE_CATALOG = [
-  { slug: "ai-reply", title: "AI Reply", category: "Featured", status: "available", badge: "New", launchMode: "info" },
-  { slug: "articles", title: "Articles", category: "Featured", status: "available", badge: "Utility", launchMode: "info" },
-  { slug: "faker-data", title: "Faker Data", category: "Featured", status: "available", badge: "Utility", launchMode: "info" },
-  { slug: "opay", title: "Opay", category: "Bank Slips", status: "available", badge: "Popular", receiptType: "bank" },
-  { slug: "kuda", title: "Kuda", category: "Bank Slips", status: "available", badge: "Popular", receiptType: "bank" },
-  { slug: "palmpay", title: "Palmpay", category: "Bank Slips", status: "comingSoon", badge: "Soon", receiptType: "bank" },
-  { slug: "binance", title: "Binance", category: "Flash Emails", status: "available", badge: "Live", receiptType: "email" },
-  { slug: "bybit", title: "Bybit", category: "Flash Emails", status: "available", badge: "Live", receiptType: "email" },
-  { slug: "coinbase", title: "Coinbase", category: "Flash Emails", status: "available", badge: "Live", receiptType: "email" },
-  { slug: "paypal", title: "PayPal", category: "Flash Emails", status: "available", badge: "Live", receiptType: "email" },
-  { slug: "stripe", title: "Stripe Connect", category: "Payment Providers", status: "available", badge: "Adapter", receiptType: "email" },
-  { slug: "paystack", title: "Paystack", category: "Payment Providers", status: "available", badge: "Adapter", receiptType: "email" },
-  { slug: "flutterwave", title: "Flutterwave", category: "Payment Providers", status: "available", badge: "Adapter", receiptType: "email" },
-  { slug: "crypto", title: "Crypto Commerce", category: "Payment Providers", status: "available", badge: "Adapter", receiptType: "email" },
-  { slug: "crypto-com", title: "Crypto.com", category: "Flash Emails", status: "available", badge: "Live", receiptType: "email" },
-  { slug: "wise", title: "Wise", category: "Flash Emails", status: "available", badge: "Live", receiptType: "email" },
-  { slug: "cash-app", title: "Cash App", category: "Flash Emails", status: "available", badge: "New", receiptType: "email" },
-  { slug: "zelle", title: "Zelle", category: "Flash Emails", status: "available", badge: "New", receiptType: "email" },
-  { slug: "venmo", title: "Venmo", category: "Flash Emails", status: "available", badge: "New", receiptType: "email" },
-  { slug: "trust-wallet", title: "Trust Wallet", category: "Flash Emails", status: "available", badge: "New", receiptType: "email" },
-  { slug: "gcash", title: "GCash", category: "Flash Emails", status: "available", badge: "New", receiptType: "email" },
-  { slug: "crypto-receipts", title: "Crypto Receipts", category: "Crypto Receipts", status: "available", badge: "Live", receiptType: "email" },
-  { slug: "support-sites", title: "Support Sites", category: "Support Pages", status: "available", badge: "Suite", launchMode: "info" },
-  { slug: "pass-clone", title: "Pass Clone", category: "Password Clone", status: "available", badge: "Suite", launchMode: "info" },
-  { slug: "wallet-tracker", title: "Wallet Tracker", category: "Wallet Tracker", status: "available", badge: "New", launchMode: "info" },
-  { slug: "qr-code", title: "QR Code", category: "QR Code Generator", status: "available", badge: "New", launchMode: "info" },
-  { slug: "link-shortener", title: "Link Shortener", category: "Link Shortener", status: "available", badge: "New", launchMode: "info" },
-  { slug: "investinnova", title: "Investinnova - Investment platform", category: "Scripts", status: "available", badge: "95,000 pts", launchMode: "info" },
+  { slug: "transaction-record", title: "Verified Transaction Record", category: "Transaction Records", status: "active", badge: "Verified", executionMode: "authoritative" },
+  { slug: "ai-reply", title: "Support AI Reply", category: "Featured", status: "active", badge: "Live", launchMode: "info" },
+  { slug: "articles", title: "Ops Playbooks", category: "Knowledge Library", status: "active", badge: "Live", launchMode: "info" },
+  { slug: "faker-data", title: "Sandbox Test Data", category: "Sandbox Tools", status: "sandbox", badge: "Sandbox", receiptType: "bank", executionMode: "sandbox", launchMode: "info" },
+  { slug: "opay", title: "Opay", category: "Legacy Wallet Records", status: "disabled", badge: "Disabled" },
+  { slug: "kuda", title: "Kuda", category: "Legacy Wallet Records", status: "disabled", badge: "Disabled" },
+  { slug: "palmpay", title: "Palmpay", category: "Legacy Wallet Records", status: "disabled", badge: "Disabled" },
+  { slug: "binance", title: "Binance", category: "Legacy Notifications", status: "disabled", badge: "Disabled" },
+  { slug: "bybit", title: "Bybit", category: "Legacy Notifications", status: "disabled", badge: "Disabled" },
+  { slug: "coinbase", title: "Coinbase", category: "Legacy Notifications", status: "disabled", badge: "Disabled" },
+  { slug: "paypal", title: "PayPal", category: "Payment Providers", status: "active", badge: "Live" },
+  { slug: "stripe", title: "Stripe Connect", category: "Payment Providers", status: "active", badge: "Adapter" },
+  { slug: "paystack", title: "Paystack", category: "Payment Providers", status: "active", badge: "Adapter" },
+  { slug: "flutterwave", title: "Flutterwave", category: "Payment Providers", status: "active", badge: "Adapter" },
+  { slug: "crypto", title: "Crypto Commerce", category: "Payment Providers", status: "active", badge: "Adapter" },
+  { slug: "crypto-com", title: "Crypto.com", category: "Legacy Notifications", status: "disabled", badge: "Disabled" },
+  { slug: "wise", title: "Wise", category: "Payment Providers", status: "active", badge: "Live" },
+  { slug: "cash-app", title: "Cash App", category: "Legacy Notifications", status: "disabled", badge: "Disabled" },
+  { slug: "zelle", title: "Zelle", category: "Legacy Notifications", status: "disabled", badge: "Disabled" },
+  { slug: "venmo", title: "Venmo", category: "Legacy Notifications", status: "disabled", badge: "Disabled" },
+  { slug: "trust-wallet", title: "Trust Wallet", category: "Legacy Notifications", status: "disabled", badge: "Disabled" },
+  { slug: "gcash", title: "GCash", category: "Legacy Notifications", status: "disabled", badge: "Disabled" },
+  { slug: "crypto-receipts", title: "Receipt Vault", category: "Receipt Vault", status: "active", badge: "Live" },
+  { slug: "support-sites", title: "Support Desk", category: "Support Desk", status: "preview", badge: "Preview", launchMode: "info" },
+  { slug: "pass-clone", title: "Security Center", category: "Legacy Security Tools", status: "disabled", badge: "Disabled", launchMode: "info" },
+  { slug: "wallet-tracker", title: "Provider Balance Tracker", category: "Provider Balance Tracker", status: "preview", badge: "Preview", launchMode: "info" },
+  { slug: "qr-code", title: "Payment QR", category: "Payment QR", status: "preview", badge: "Preview", launchMode: "info" },
+  { slug: "link-shortener", title: "Payment Link Shortener", category: "Legacy Payment Links", status: "disabled", badge: "Disabled", launchMode: "info" },
+  { slug: "investinnova", title: "Workflow Templates", category: "Template Marketplace", status: "preview", badge: "Preview", launchMode: "info" },
 ];
+
+const PAYMENT_PROVIDER_SLUGS = new Set(["paypal", "stripe", "wise", "paystack", "flutterwave", "crypto"]);
+
+const CATEGORY_COMMAND_CENTERS = Object.freeze({
+  "Verified Notifications": {
+    title: "Notification Command Center",
+    summary: "Run provider-styled notification receipts, templates, and vault follow-up from one service workspace.",
+    capabilities: ["Custom notification details", "Deposit notification flow", "Template library", "Receipt vault handoff"],
+    lanes: [
+      { id: "custom-notification", label: "Custom Notification", summary: "Compose a branded notification with operator-entered sender, amount, memo, and recipient details.", miniAppSection: "studio", action: "custom" },
+      { id: "deposit-notification", label: "Deposit Notification", summary: "Generate a quick deposit-style notification from the supported receipt engine.", miniAppSection: "generate", action: "run" },
+      { id: "template-library", label: "Template Library", summary: "Open reusable notification templates and provider-safe copy patterns for this service.", miniAppSection: "studio" },
+      { id: "receipt-vault", label: "Receipt Vault", summary: "Review recent generated receipts and support-ready receipt context.", miniAppSection: "vault", action: "history" },
+    ],
+  },
+  "Verified Wallets": {
+    title: "Wallet Record Command Center",
+    summary: "Create wallet records, inspect support context, and track readiness around wallet-style receipts.",
+    capabilities: ["Wallet record composer", "Support context", "Wallet activity", "Balance readiness"],
+    lanes: [
+      { id: "wallet-record", label: "Wallet Record", summary: "Create a wallet-record receipt with customer, amount, reference, and status details.", miniAppSection: "studio", action: "custom" },
+      { id: "support-context", label: "Support Context", summary: "Open support notes and Telegram-linked context for wallet receipt questions.", miniAppSection: "support" },
+      { id: "wallet-activity", label: "Wallet Activity", summary: "Review recent wallet receipt activity and operator handoffs.", miniAppSection: "activity", action: "history" },
+      { id: "balance-readiness", label: "Balance Readiness", summary: "Check Transferly wallet and points readiness before generating or reviewing wallet records.", miniAppSection: "wallet", action: "balance" },
+    ],
+  },
+  "Receipt Vault": {
+    title: "Receipt Vault Command Center",
+    summary: "Search, duplicate, inspect, and hand off receipt records without leaving the service workspace.",
+    capabilities: ["Vault search", "Duplicate receipt review", "Support handoff", "Activity audit trail"],
+    lanes: [
+      { id: "vault-search", label: "Vault Search", summary: "Open recent receipt history and search-ready vault context.", miniAppSection: "vault", action: "history" },
+      { id: "duplicate-receipt", label: "Duplicate Receipt", summary: "Review an existing receipt before launching a duplicate or adjusted version.", miniAppSection: "studio", action: "custom" },
+      { id: "support-handoff", label: "Support Handoff", summary: "Prepare receipt context for a support conversation.", miniAppSection: "support" },
+      { id: "activity-trail", label: "Activity Trail", summary: "Inspect generated receipt activity and audit context.", miniAppSection: "activity" },
+    ],
+  },
+});
+
+const SERVICE_COMMAND_CENTER_OVERRIDES = Object.freeze({
+  "ai-reply": {
+    title: "Support AI Command Center",
+    summary: "Draft support replies with Transferly context while keeping the final message operator-controlled.",
+    capabilities: ["Draft reply", "Support context", "Saved replies", "Activity review"],
+    lanes: [
+      { id: "draft-reply", label: "Draft Reply", summary: "Open the support workspace for a guided, operator-reviewed response draft.", miniAppSection: "support" },
+      { id: "support-context", label: "Support Context", summary: "Review linked Telegram profile, current workspace, receipt, and provider context.", miniAppSection: "support" },
+      { id: "saved-replies", label: "Saved Replies", summary: "Use reusable response patterns for common Transferly support scenarios.", miniAppSection: "support" },
+      { id: "activity-review", label: "Activity Review", summary: "Inspect recent account and receipt activity before sending a reply.", miniAppSection: "activity" },
+    ],
+  },
+  articles: {
+    title: "Ops Knowledge Command Center",
+    summary: "Keep provider runbooks, support playbooks, activity lessons, and security notes close to the operator flow.",
+    capabilities: ["Provider runbooks", "Support playbooks", "Activity lessons", "Security notes"],
+    lanes: [
+      { id: "provider-runbooks", label: "Provider Runbooks", summary: "Open provider operation playbooks for invoice, payout, and webhook handling.", miniAppSection: "ops" },
+      { id: "support-playbooks", label: "Support Playbooks", summary: "Review support scripts and decision trees for active user cases.", miniAppSection: "support" },
+      { id: "activity-lessons", label: "Activity Lessons", summary: "Inspect activity patterns and examples operators should recognize.", miniAppSection: "activity" },
+      { id: "security-notes", label: "Security Notes", summary: "Open security and access-control notes before sensitive actions.", miniAppSection: "security" },
+    ],
+  },
+  "faker-data": {
+    title: "Sandbox Data Command Center",
+    summary: "Generate clearly marked sandbox-only payloads for QA, demos, and operator training.",
+    capabilities: ["Sandbox payloads", "Studio preview", "Vault review", "Operator training"],
+    lanes: [
+      { id: "sandbox-payload", label: "Sandbox Payload", summary: "Prepare non-production receipt and customer data for testing.", miniAppSection: "studio" },
+      { id: "studio-preview", label: "Studio Preview", summary: "Open the receipt studio with sandbox-safe context.", miniAppSection: "studio" },
+      { id: "vault-review", label: "Vault Review", summary: "Review generated demo receipts in the vault workspace.", miniAppSection: "vault" },
+      { id: "operator-training", label: "Operator Training", summary: "Route sandbox examples into training and activity review workflows.", miniAppSection: "activity" },
+    ],
+  },
+  "support-sites": {
+    title: "Support Desk Command Center",
+    summary: "Bring identity, receipt, provider, and security context into one support-first workspace.",
+    capabilities: ["Support desk", "Escalation states", "Receipt context", "Security context"],
+    lanes: [
+      { id: "support-desk", label: "Support Desk", summary: "Open the Telegram-native support desk for the active account context.", miniAppSection: "support" },
+      { id: "escalation-states", label: "Escalation States", summary: "Review support priority, blocked state, and handoff readiness.", miniAppSection: "support" },
+      { id: "receipt-context", label: "Receipt Context", summary: "Open vault context for recent receipt questions.", miniAppSection: "vault" },
+      { id: "security-context", label: "Security Context", summary: "Check access and sensitive workflow context before escalation.", miniAppSection: "security" },
+    ],
+  },
+  "pass-clone": {
+    title: "Security Center Command Center",
+    summary: "Keep account-linking, provider readiness, support safety, and audit checks visible before sensitive actions.",
+    capabilities: ["Security center", "Provider readiness", "Support safety", "Activity audit"],
+    lanes: [
+      { id: "security-center", label: "Security Center", summary: "Open sensitive workflow posture, audit, and access-control context.", miniAppSection: "security" },
+      { id: "provider-readiness", label: "Provider Readiness", summary: "Review provider setup and operational readiness before action.", miniAppSection: "ops" },
+      { id: "support-safety", label: "Support Safety", summary: "Route questionable cases to support before operators continue.", miniAppSection: "support" },
+      { id: "activity-audit", label: "Activity Audit", summary: "Review recent activity for suspicious or duplicate patterns.", miniAppSection: "activity" },
+    ],
+  },
+  "wallet-tracker": {
+    title: "Provider Balance Command Center",
+    summary: "Track provider balances and payout readiness beside Transferly wallet context.",
+    capabilities: ["Balance overview", "Provider ops", "Payout activity", "Support handoff"],
+    lanes: [
+      { id: "balance-overview", label: "Balance Overview", summary: "Open wallet and balance context for the linked Transferly user.", miniAppSection: "wallet", action: "balance" },
+      { id: "provider-ops", label: "Provider Ops", summary: "Review provider command-center readiness and operational controls.", miniAppSection: "ops" },
+      { id: "payout-activity", label: "Payout Activity", summary: "Inspect payout and funding activity from the mini app.", miniAppSection: "payouts" },
+      { id: "support-handoff", label: "Support Handoff", summary: "Prepare support context for balance or payout questions.", miniAppSection: "support" },
+    ],
+  },
+  "qr-code": {
+    title: "Payment QR Command Center",
+    summary: "Create payment QR handoffs tied to invoices, vault records, and activity review.",
+    capabilities: ["QR studio", "Invoice handoff", "Vault reference", "QR activity"],
+    lanes: [
+      { id: "qr-studio", label: "QR Studio", summary: "Open the studio for a QR-led payment or receipt handoff.", miniAppSection: "studio" },
+      { id: "invoice-handoff", label: "Invoice Handoff", summary: "Move from QR context into invoice review.", miniAppSection: "invoices" },
+      { id: "vault-reference", label: "Vault Reference", summary: "Attach recent receipt context from the vault.", miniAppSection: "vault" },
+      { id: "qr-activity", label: "QR Activity", summary: "Review QR-related payment and support activity.", miniAppSection: "activity" },
+    ],
+  },
+  "link-shortener": {
+    title: "Payment Links Command Center",
+    summary: "Manage payment link handoffs, provider context, and support visibility from one workspace.",
+    capabilities: ["Payment links", "Studio link", "Provider links", "Link support"],
+    lanes: [
+      { id: "payment-links", label: "Payment Links", summary: "Open payment link activity and collection context.", miniAppSection: "activity" },
+      { id: "studio-link", label: "Studio Link", summary: "Create a studio-backed payment or receipt link.", miniAppSection: "studio" },
+      { id: "provider-links", label: "Provider Links", summary: "Review provider-side payment link readiness.", miniAppSection: "ops" },
+      { id: "link-support", label: "Link Support", summary: "Prepare support context for failed or disputed links.", miniAppSection: "support" },
+    ],
+  },
+  investinnova: {
+    title: "Template Marketplace Command Center",
+    summary: "Open premium workflow templates, provider onboarding playbooks, and operator triage flows.",
+    capabilities: ["Template marketplace", "Provider onboarding", "Support triage", "Payout operations"],
+    lanes: [
+      { id: "template-marketplace", label: "Template Marketplace", summary: "Browse reusable workflow templates for Transferly operators.", miniAppSection: "studio" },
+      { id: "provider-onboarding", label: "Provider Onboarding", summary: "Review provider setup and onboarding playbooks.", miniAppSection: "ops" },
+      { id: "support-triage", label: "Support Triage", summary: "Route template questions into guided support context.", miniAppSection: "support" },
+      { id: "payout-operations", label: "Payout Operations", summary: "Open payout operations context connected to the template workflow.", miniAppSection: "payouts" },
+    ],
+  },
+});
 
 const SERVICE_BY_SLUG = new Map(SERVICE_CATALOG.map((service) => [service.slug, service]));
 const SERVICE_GROUP_BY_ID = new Map(SERVICE_GROUPS.map((group) => [group.id, group]));
@@ -96,7 +237,11 @@ function getGroup(groupId) {
 }
 
 function canGenerateService(service) {
-  return Boolean(service?.receiptType && service.status === "available");
+  return Boolean(
+    service?.receiptType &&
+      service.status === "sandbox" &&
+      service.executionMode === "sandbox",
+  );
 }
 
 function getServiceGroupId(service) {
@@ -107,13 +252,41 @@ function getServiceGroupId(service) {
 function serviceSummary(service) {
   if (!service) return "Unknown service.";
   if (canGenerateService(service)) {
-    const flow = service.receiptType === "bank" ? "Bank-slip receipt" : "Email receipt";
-    return `${flow} service in the ${service.category} workspace.`;
+    return "Creates permanently labelled test data for sandbox and QA use only.";
   }
-  if (service.status === "comingSoon") {
-    return "This service is visible in the catalog but is not enabled for generation yet.";
+  if (service.status === "disabled") {
+    return "This legacy integration is disabled and cannot generate records.";
   }
-  return "This catalog service is available as an informational or web-app workspace entry.";
+  if (service.status === "preview") {
+    return "This service is visible for preview but is not enabled for execution.";
+  }
+  if (service.executionMode === "authoritative") {
+    return "Creates records only from existing authoritative Transferly transactions.";
+  }
+  return "This service is available through its supported Transferly workspace.";
+}
+
+function getServiceCommandCenter(service) {
+  if (!service || !AVAILABLE_SERVICE_STATUSES.has(service.status) || PAYMENT_PROVIDER_SLUGS.has(service.slug)) {
+    return null;
+  }
+  const template = SERVICE_COMMAND_CENTER_OVERRIDES[service.slug] || CATEGORY_COMMAND_CENTERS[service.category];
+  if (!template) return null;
+
+  return {
+    title: template.title,
+    summary: template.summary,
+    capabilities: template.capabilities || [],
+    lanes: (template.lanes || []).map((lane) => ({
+      ...lane,
+      status: lane.status || "live",
+    })),
+  };
+}
+
+function getServiceLane(service, laneId) {
+  const commandCenter = getServiceCommandCenter(service);
+  return commandCenter?.lanes.find((lane) => lane.id === laneId) || null;
 }
 
 function searchServices(term, limit = 8) {
@@ -151,4 +324,6 @@ module.exports = {
   canGenerateService,
   getServiceGroupId,
   serviceSummary,
+  getServiceCommandCenter,
+  getServiceLane,
 };

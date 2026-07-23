@@ -50,6 +50,13 @@ const AUDIT_ACTOR_TYPE = Object.freeze({
   WEBHOOK: 'WEBHOOK'
 });
 
+const USER_STATUS = Object.freeze({
+  ACTIVE: 'active',
+  SUSPENDED: 'suspended',
+  RESTRICTED: 'restricted',
+  DELETED: 'deleted'
+});
+
 const WEBHOOK_PROCESSING_STATUS = Object.freeze({
   RECEIVED: 'RECEIVED',
   VERIFIED: 'VERIFIED',
@@ -89,12 +96,68 @@ const RECEIPT_STATUS = Object.freeze({
 });
 
 const POINT_TRANSACTION_TYPE = Object.freeze({
+  LEDGER_OPENING_BALANCE: 'LEDGER_OPENING_BALANCE',
   SIGNUP_BONUS: 'SIGNUP_BONUS',
   REFERRAL_BONUS: 'REFERRAL_BONUS',
   RECEIPT_SPEND: 'RECEIPT_SPEND',
   EMAIL_SPEND: 'EMAIL_SPEND',
   TOP_UP_PURCHASE: 'TOP_UP_PURCHASE',
-  ADMIN_ADJUSTMENT: 'ADMIN_ADJUSTMENT'
+  ADMIN_ADJUSTMENT: 'ADMIN_ADJUSTMENT',
+  POINT_PROJECTION_RECONCILIATION: 'POINT_PROJECTION_RECONCILIATION',
+  POINT_RESERVATION_HOLD: 'POINT_RESERVATION_HOLD',
+  POINT_RESERVATION_COMMIT: 'POINT_RESERVATION_COMMIT',
+  POINT_RESERVATION_RELEASE: 'POINT_RESERVATION_RELEASE'
+});
+
+const POINT_RESERVATION_STATUS = Object.freeze({
+  RESERVED: 'RESERVED',
+  COMMITTED: 'COMMITTED',
+  RELEASED: 'RELEASED',
+  EXPIRED: 'EXPIRED'
+});
+
+const ORDER_STATUS = Object.freeze({
+  DRAFT: 'draft',
+  VALIDATING: 'validating',
+  PREFLIGHT: 'preflight',
+  POINTS_RESERVED: 'points_reserved',
+  QUEUED: 'queued',
+  PROCESSING: 'processing',
+  COMPLETED: 'completed',
+  VALIDATION_FAILED: 'validation_failed',
+  INSUFFICIENT_POINTS: 'insufficient_points',
+  MANUAL_REVIEW: 'manual_review',
+  FAILED: 'failed',
+  CANCELLED: 'cancelled',
+  EXPIRED: 'expired',
+  REFUNDED: 'refunded'
+});
+
+const ORDER_QUEUE_STATUS = Object.freeze({
+  PENDING: 'pending',
+  DISPATCH_PENDING: 'dispatch_pending',
+  DISPATCHED: 'dispatched',
+  PROCESSING: 'processing',
+  UNAVAILABLE: 'unavailable'
+});
+
+const ORDER_ATTEMPT_STATUS = Object.freeze({
+  PROCESSING: 'processing',
+  SUCCEEDED: 'succeeded',
+  FAILED: 'failed',
+  STALE: 'stale'
+});
+
+const DEAD_LETTER_STATUS = Object.freeze({
+  OPEN: 'open',
+  RECOVERY_PENDING: 'recovery_pending',
+  RECOVERED: 'recovered',
+  RECOVERY_FAILED: 'recovery_failed'
+});
+
+const WORKER_FAILURE_CLASSIFICATION = Object.freeze({
+  RETRYABLE: 'retryable',
+  TERMINAL: 'terminal'
 });
 
 const TOP_UP_ORDER_STATUS = Object.freeze({
@@ -118,6 +181,7 @@ module.exports = {
   LEDGER_ENTRY_TYPE,
   BALANCE_BUCKET,
   AUDIT_ACTOR_TYPE,
+  USER_STATUS,
   WEBHOOK_PROCESSING_STATUS,
   RISK_FLAG_SEVERITY,
   RISK_FLAG_STATUS,
@@ -125,6 +189,12 @@ module.exports = {
   RECEIPT_TYPE,
   RECEIPT_STATUS,
   POINT_TRANSACTION_TYPE,
+  POINT_RESERVATION_STATUS,
+  ORDER_STATUS,
+  ORDER_QUEUE_STATUS,
+  ORDER_ATTEMPT_STATUS,
+  DEAD_LETTER_STATUS,
+  WORKER_FAILURE_CLASSIFICATION,
   TOP_UP_ORDER_STATUS,
   EMAIL_DISPATCH_STATUS
 };

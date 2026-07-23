@@ -4,6 +4,7 @@ const sqlite3 = require('sqlite3').verbose();
 // Store DB in project root as data.db
 const dbPath = path.resolve(__dirname, '../db/data.db');
 const db = new sqlite3.Database(dbPath);
+db.configure?.('busyTimeout', 5000);
 
 const { ownerId, userId, username } = require('../config').admin;
 
@@ -79,6 +80,8 @@ function initializeUsersTable() {
 }
 
 db.serialize(() => {
+  db.run(`PRAGMA journal_mode = WAL`);
+  db.run(`PRAGMA foreign_keys = ON`);
   initializeUsersTable();
 
   db.run(`CREATE TABLE IF NOT EXISTS script_versions (
@@ -162,6 +165,14 @@ db.serialize(() => {
     value TEXT NOT NULL,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bot_sessions_updated_at ON bot_sessions(updated_at)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bot_user_audit_created_at ON bot_user_audit_logs(created_at)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bot_access_denials_created_at ON bot_access_denials(created_at)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bot_payment_audit_created_at ON bot_payment_audit_logs(created_at)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bot_analytics_created_at ON bot_analytics_events(created_at)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bot_analytics_action_created_at ON bot_analytics_events(action, created_at)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bot_subscription_alerts_user_threshold ON bot_subscription_alerts(telegram_id, threshold, sent_at)`);
 });
 
 function getUser(id, cb) {
@@ -291,6 +302,15 @@ function deleteBotSession(key) {
       else resolve();
     });
   });
+}
+
+function cleanupExpiredBotSessions(maxAgeHours = 336, cb = () => {}) {
+  const safeHours = Math.min(Math.max(Number.parseInt(maxAgeHours, 10) || 336, 1), 8760);
+  db.run(
+    `DELETE FROM bot_sessions WHERE updated_at <= datetime('now', ?)`,
+    [`-${safeHours} hours`],
+    cb,
+  );
 }
 
 function recordBotUserAudit(entry = {}, cb = () => {}) {
@@ -563,7 +583,12 @@ function getBotAnalyticsStats(cb = () => {}) {
     failures_24h: 0,
     payment_actions_24h: 0,
     access_denials_24h: 0,
-    active_sessions_24h: 0
+    active_sessions_24h: 0,
+    callback_failures_24h: 0,
+    callback_recoveries_24h: 0,
+    unknown_actions_24h: 0,
+    callback_status_totals_24h: [],
+    slow_actions_24h: []
   };
 
   db.serialize(() => {
@@ -618,7 +643,81 @@ function getBotAnalyticsStats(cb = () => {}) {
                           (sessionError, sessionRow) => {
                             if (sessionError) return cb(sessionError);
                             stats.active_sessions_24h = sessionRow?.count || 0;
-                            cb(null, stats);
+
+                            db.get(
+                              `SELECT COUNT(*) AS count
+                               FROM bot_analytics_events
+                               WHERE created_at >= datetime('now', '-24 hours')
+                                 AND category = 'callback'
+                                 AND status != 'ok'`,
+                              [],
+                              (callbackFailureError, callbackFailureRow) => {
+                                if (callbackFailureError) return cb(callbackFailureError);
+                                stats.callback_failures_24h = callbackFailureRow?.count || 0;
+
+                                db.get(
+                                  `SELECT COUNT(*) AS count
+                                   FROM bot_analytics_events
+                                   WHERE created_at >= datetime('now', '-24 hours')
+                                     AND category = 'callback_recovery'`,
+                                  [],
+                                  (recoveryError, recoveryRow) => {
+                                    if (recoveryError) return cb(recoveryError);
+                                    stats.callback_recoveries_24h = recoveryRow?.count || 0;
+
+                                    db.get(
+                                      `SELECT COUNT(*) AS count
+                                       FROM bot_analytics_events
+                                       WHERE created_at >= datetime('now', '-24 hours')
+                                         AND category = 'callback'
+                                         AND status = 'unknown'`,
+                                      [],
+                                      (unknownError, unknownRow) => {
+                                        if (unknownError) return cb(unknownError);
+                                        stats.unknown_actions_24h = unknownRow?.count || 0;
+
+                                        db.all(
+                                          `SELECT status, COUNT(*) AS count
+                                           FROM bot_analytics_events
+                                           WHERE created_at >= datetime('now', '-24 hours')
+                                             AND category = 'callback'
+                                           GROUP BY status
+                                           ORDER BY count DESC
+                                           LIMIT 8`,
+                                          [],
+                                          (callbackStatusError, callbackStatusRows = []) => {
+                                            if (callbackStatusError) return cb(callbackStatusError);
+                                            stats.callback_status_totals_24h = callbackStatusRows || [];
+
+                                            db.all(
+                                              `SELECT
+                                                 action,
+                                                 COALESCE(category, 'uncategorized') AS category,
+                                                 ROUND(AVG(duration_ms)) AS avg_duration_ms,
+                                                 MAX(duration_ms) AS max_duration_ms,
+                                                 COUNT(*) AS count,
+                                                 MAX(created_at) AS last_seen_at
+                                               FROM bot_analytics_events
+                                               WHERE created_at >= datetime('now', '-24 hours')
+                                                 AND duration_ms IS NOT NULL
+                                               GROUP BY action, COALESCE(category, 'uncategorized')
+                                               ORDER BY avg_duration_ms DESC, max_duration_ms DESC, last_seen_at DESC
+                                               LIMIT 5`,
+                                              [],
+                                              (slowActionError, slowActionRows = []) => {
+                                                if (slowActionError) return cb(slowActionError);
+                                                stats.slow_actions_24h = slowActionRows || [];
+                                                cb(null, stats);
+                                              }
+                                            );
+                                          }
+                                        );
+                                      }
+                                    );
+                                  }
+                                );
+                              }
+                            );
                           }
                         );
                       }
@@ -892,6 +991,7 @@ module.exports = {
   readBotSession,
   writeBotSession,
   deleteBotSession,
+  cleanupExpiredBotSessions,
   recordBotUserAudit,
   recordBotAccessDenied,
   getBotOpsStats,

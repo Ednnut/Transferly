@@ -19,6 +19,43 @@ function getReadiness(requiredEnv) {
   };
 }
 
+const PROVIDER_ADAPTER_METHODS = Object.freeze({
+  createInvoice: ['invoice.create', 'payment_request.create', 'payment_link.create', 'charge.create'],
+  sendInvoice: ['invoice.send', 'payment_request.send', 'invoice.finalize'],
+  previewInvoice: ['invoice.create', 'payment_request.create', 'payment_link.create', 'charge.create'],
+  createPayout: ['payout.create', 'transfer.create', 'payout.transfer_to_connected_account'],
+  previewPayout: ['payout.preview', 'quote.create', 'transfer_rate.quote'],
+  refreshTransaction: ['invoice.refresh', 'charge.refresh', 'transfer.refresh', 'transfer.verify'],
+  getBalance: ['balance.retrieve'],
+  listTransactions: ['transaction.list', 'transaction.search', 'activity.list', 'dispute.list'],
+  verifyWebhook: ['webhook.verify'],
+  normalizeWebhookEvent: ['webhook.verify'],
+  mapProviderStatus: ['invoice.refresh', 'charge.refresh', 'transfer.refresh', 'transfer.verify', 'webhook.verify']
+});
+
+function inferAdapterOperationStatus(definition, methodName) {
+  const explicit = definition.adapterOperations?.[methodName];
+  if (explicit) {
+    return typeof explicit === 'string' ? { status: explicit } : explicit;
+  }
+
+  const supportedOperations = new Set(definition.supportedOperations || []);
+  const mappedOperations = PROVIDER_ADAPTER_METHODS[methodName] || [];
+  const supported = mappedOperations.filter((operation) => supportedOperations.has(operation));
+
+  if (!supported.length) {
+    return {
+      status: 'unsupported',
+      provider_operations: mappedOperations
+    };
+  }
+
+  return {
+    status: 'preview',
+    provider_operations: supported
+  };
+}
+
 function createProviderAdapter(definition) {
   const requiredEnv = definition.requiredEnv || [];
   const invoiceFeatures = definition.invoiceFeatures || {
@@ -45,17 +82,50 @@ function createProviderAdapter(definition) {
       next_actions: readiness.configured
         ? definition.configuredNextActions
         : definition.nextActions
+      };
+  }
+
+  function buildAdapterContract() {
+    const readiness = getReadiness(requiredEnv);
+    return {
+      provider: definition.key,
+      display_name: definition.displayName,
+      mode: definition.mode || 'external',
+      configured: readiness.configured,
+      required_env: readiness.required_env,
+      missing_env: readiness.missing_env,
+      operations: Object.fromEntries(
+        Object.keys(PROVIDER_ADAPTER_METHODS).map((methodName) => [
+          methodName,
+          {
+            method: methodName,
+            ...inferAdapterOperationStatus(definition, methodName)
+          }
+        ])
+      )
     };
   }
 
   async function operationNotImplemented(operation) {
+    const contract = buildAdapterContract();
+    const operationContract = contract.operations[operation] || { status: 'unsupported' };
+    const status = operationContract.status === 'unsupported' ? 'unsupported' : 'setup';
+
     throw new AppError(
       501,
       'PAYMENT_PROVIDER_OPERATION_NOT_IMPLEMENTED',
-      `${definition.displayName} ${operation} is registered but not implemented yet.`,
+      `${definition.displayName} ${operation} is not available in Transferly yet.`,
       {
         provider: definition.key,
-        operation
+        operation,
+        status,
+        readiness: contract.configured ? 'configured' : 'needs-env',
+        required_env: contract.required_env,
+        missing_env: contract.missing_env,
+        supported_operations: definition.supportedOperations || [],
+        message: status === 'unsupported'
+          ? 'This provider does not support this Transferly action yet.'
+          : 'This provider action is registered for the workspace and remains gated until the service module is implemented.'
       }
     );
   }
@@ -85,10 +155,19 @@ function createProviderAdapter(definition) {
         docs: summary.docs
       };
     },
-    createInvoice: () => operationNotImplemented('invoice creation'),
-    createPayout: () => operationNotImplemented('payout creation'),
-    refreshResource: () => operationNotImplemented('resource refresh'),
-    verifyWebhook: () => operationNotImplemented('webhook verification')
+    getAdapterContract: buildAdapterContract,
+    createInvoice: () => operationNotImplemented('createInvoice'),
+    sendInvoice: () => operationNotImplemented('sendInvoice'),
+    previewInvoice: () => operationNotImplemented('previewInvoice'),
+    createPayout: () => operationNotImplemented('createPayout'),
+    previewPayout: () => operationNotImplemented('previewPayout'),
+    refreshTransaction: () => operationNotImplemented('refreshTransaction'),
+    refreshResource: () => operationNotImplemented('refreshTransaction'),
+    getBalance: () => operationNotImplemented('getBalance'),
+    listTransactions: () => operationNotImplemented('listTransactions'),
+    verifyWebhook: () => operationNotImplemented('verifyWebhook'),
+    normalizeWebhookEvent: () => operationNotImplemented('normalizeWebhookEvent'),
+    mapProviderStatus: () => operationNotImplemented('mapProviderStatus')
   };
 }
 

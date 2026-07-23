@@ -61,27 +61,50 @@ function hasCapability(access = {}, capability = CAPABILITIES.PUBLIC) {
 
 function getCommandCapability(command) {
   const name = String(command || "").replace(/^\//, "").toLowerCase();
-  if (["start", "menu", "help", "whoami", "cancel"].includes(name)) return CAPABILITIES.PUBLIC;
-  if (["services", "receipt"].includes(name)) return CAPABILITIES.SERVICES_USE;
-  if (["profile", "balance", "receipts", "history", "referral"].includes(name)) return CAPABILITIES.ACCOUNT_READ;
+  if (["start", "help", "support", "status", "terms", "privacy", "menu", "miniapp", "whoami", "cancel"].includes(name)) return CAPABILITIES.PUBLIC;
+  if (["services", "receipt", "providers", "provider", "paypal", "stripe", "wise", "paystack", "flutterwave", "crypto"].includes(name)) {
+    return CAPABILITIES.SERVICES_USE;
+  }
+  if (["account", "profile", "balance", "receipts", "history", "referral"].includes(name)) return CAPABILITIES.ACCOUNT_READ;
   if (["health"].includes(name)) return CAPABILITIES.HEALTH_READ;
-  if (["invoices", "payouts", "issues", "orders", "ops", "reconcile", "refresh_invoice", "refresh_payout"].includes(name)) {
+  if (["invoices", "payouts", "activity", "risk", "issues", "orders", "ops", "reconcile", "refresh_invoice", "refresh_payout"].includes(name)) {
     return CAPABILITIES.PAYMENTS_READ;
   }
   if (["approve_payout", "reject_payout", "cancel_unclaimed", "release_invoice"].includes(name)) {
     return CAPABILITIES.PAYMENTS_MUTATE;
   }
-  if (["status", "bot_ops"].includes(name)) return CAPABILITIES.SYSTEM_STATUS;
+  if (["bot_ops", "clients", "security"].includes(name)) return CAPABILITIES.SYSTEM_STATUS;
   if (["users"].includes(name)) return CAPABILITIES.USERS_MANAGE;
   return CAPABILITIES.PUBLIC;
 }
 
 function getActionCapability(action) {
   const value = String(action || "");
-  if (!value || ["BACK", "MENU", "HELP", "WHOAMI", "CANCEL"].includes(value)) return CAPABILITIES.PUBLIC;
+  if (
+    !value ||
+    [
+      "BACK",
+      "MENU",
+      "HELP",
+      "SUPPORT",
+      "SUPPORT_ACCOUNT",
+      "SUPPORT_PAYMENT",
+      "SUPPORT_TECHNICAL",
+      "SUPPORT_CONTACT",
+      "TERMS",
+      "PRIVACY",
+      "WHOAMI",
+      "CANCEL",
+      "MENU_SUPPORT",
+      "STATUS",
+      "HEALTH",
+    ].includes(value)
+  ) return CAPABILITIES.PUBLIC;
   if (
     value.startsWith("GROUP:") ||
     value.startsWith("SERVICE:") ||
+    value.startsWith("SERVICE_ACTION:") ||
+    value.startsWith("SERVICE_LANE:") ||
     value.startsWith("PROVIDER:") ||
     value.startsWith("PROVIDER_CUSTOM:") ||
     value.startsWith("PROVIDER_LANE:") ||
@@ -90,6 +113,9 @@ function getActionCapability(action) {
     value.startsWith("HISTORY:") ||
     value.startsWith("INFO:") ||
     value === "SERVICES" ||
+    value === "PROVIDERS" ||
+    value === "MENU_COLLECT" ||
+    value === "MENU_SEND" ||
     value === "SEARCH:SERVICE" ||
     value === "PP:HOME" ||
     value === "PP:EMAIL" ||
@@ -97,10 +123,9 @@ function getActionCapability(action) {
   ) {
     return CAPABILITIES.SERVICES_USE;
   }
-  if (["PROFILE", "BALANCE", "RECEIPTS", "REFERRAL"].includes(value)) return CAPABILITIES.ACCOUNT_READ;
-  if (value === "HEALTH") return CAPABILITIES.HEALTH_READ;
+  if (["PROFILE", "BALANCE", "RECEIPTS", "REFERRAL", "MENU_ACCOUNT"].includes(value)) return CAPABILITIES.ACCOUNT_READ;
   if (
-    ["STATUS", "BOT_OPS", "BOT_ANALYTICS", "SUBSCRIPTION_ALERTS", "PAYMENT_AUDIT"].includes(value) ||
+    ["BOT_OPS", "BOT_ANALYTICS", "SUBSCRIPTION_ALERTS", "PAYMENT_AUDIT", "CLIENTS", "SECURITY", "MENU_ADMIN"].includes(value) ||
     value.startsWith("ALERT_") ||
     value.startsWith("PAY_AUDIT_F:") ||
     value.startsWith("EXPORT_")
@@ -109,6 +134,8 @@ function getActionCapability(action) {
     value === "INVOICES" ||
     value === "PAYOUTS" ||
     value === "OPS" ||
+    value === "ACTIVITY" ||
+    value === "RISK" ||
     value === "ISSUES" ||
     value === "ORDERS" ||
     value === "RECONCILE" ||
@@ -128,7 +155,13 @@ function getActionCapability(action) {
   ) {
     return CAPABILITIES.PAYMENTS_READ;
   }
-  if (value.startsWith("PROVIDER_INV:")) return CAPABILITIES.PAYMENTS_READ;
+  if (
+    value.startsWith("PROVIDER_INV:") ||
+    value.startsWith("PROVIDER_PO:") ||
+    value.startsWith("PROVIDER_BAL:") ||
+    value.startsWith("PROVIDER_WEBHOOKS:") ||
+    value.startsWith("PROVIDER_ISSUES:")
+  ) return CAPABILITIES.PAYMENTS_READ;
   if (
     value.startsWith("PP:INV_RELEASE:") ||
     value.startsWith("PP:INV_DO_RELEASE:") ||

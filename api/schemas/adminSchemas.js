@@ -1,6 +1,7 @@
 const { z } = require('zod');
 const { invoiceLineItemSchema, listInvoicesQuerySchema } = require('./invoiceSchemas');
 
+const paymentProviderSlugSchema = z.enum(['paypal', 'stripe', 'crypto', 'paystack', 'flutterwave', 'wise']);
 const reminderTypeSchema = z.enum(['BEFORE_DUE', 'AFTER_DUE']);
 const reminderIntervalUnitSchema = z.enum(['DAY', 'WEEK']);
 
@@ -21,13 +22,20 @@ const adminUserIdParamsSchema = z.object({
 });
 
 const adminAdjustUserPointsSchema = z.object({
-  delta: z.coerce.number().int().min(-1000000).max(1000000),
-  reason: z.string().trim().max(1000).optional()
+  delta: z.coerce.number().int().min(-1000000).max(1000000).refine((value) => value !== 0, {
+    message: 'Point adjustment must be non-zero.'
+  }),
+  reason: z.string().trim().min(3).max(1000)
+});
+
+const adminReconcileUserPointsSchema = z.object({
+  reason: z.string().trim().min(3).max(1000)
 });
 
 const listAdminPayoutsQuerySchema = z.object({
   status: z.string().trim().min(1).optional(),
   riskDecision: z.string().trim().min(1).optional(),
+  provider: paymentProviderSlugSchema.optional(),
   providerState: z.string().trim().min(1).optional(),
   recipient: z.string().trim().min(1).optional(),
   dateFrom: z.string().trim().min(1).optional(),
@@ -86,11 +94,28 @@ const listRiskFlagsQuerySchema = z.object({
 const listWebhookEventsQuerySchema = z.object({
   status: z.string().min(1).optional(),
   eventType: z.string().min(1).optional(),
+  provider: paymentProviderSlugSchema.optional(),
   limit: z.coerce.number().int().positive().max(100).default(50)
+});
+
+const webhookEventParamsSchema = z.object({
+  id: z.string().trim().min(1)
+});
+
+const webhookEventActionSchema = z.object({
+  note: z.string().trim().max(1000).optional()
 });
 
 const listDeadLetterJobsQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(50)
+});
+
+const deadLetterJobParamsSchema = z.object({
+  id: z.string().trim().min(1)
+});
+
+const deadLetterRecoverySchema = z.object({
+  note: z.string().trim().max(1000).optional()
 });
 
 const runPaymentReconciliationSchema = z.object({
@@ -102,6 +127,7 @@ const listPaymentOpsIssuesQuerySchema = z.object({
   status: z.string().trim().min(1).optional(),
   entityType: z.string().trim().min(1).optional(),
   severity: z.string().trim().min(1).optional(),
+  provider: paymentProviderSlugSchema.optional(),
   limit: z.coerce.number().int().positive().max(100).default(50)
 });
 
@@ -268,6 +294,7 @@ const adminInvoiceReminderUpdateSchema = z.object({
 
 module.exports = {
   adminAdjustUserPointsSchema,
+  adminReconcileUserPointsSchema,
   adminConfigUpdateSchema,
   adminFaqCreateSchema,
   adminFaqParamsSchema,
@@ -301,5 +328,9 @@ module.exports = {
   listAdminInvoicesQuerySchema,
   listRiskFlagsQuerySchema,
   listWebhookEventsQuerySchema,
-  listDeadLetterJobsQuerySchema
+  webhookEventActionSchema,
+  webhookEventParamsSchema,
+  listDeadLetterJobsQuerySchema,
+  deadLetterJobParamsSchema,
+  deadLetterRecoverySchema
 };

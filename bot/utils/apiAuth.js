@@ -116,4 +116,9 @@ function attachHmacAuth(axiosInstance, options = {}) {
 
 module.exports = {
   attachHmacAuth,
+  buildSignature,
+  normalizeBody,
+  stableStringify,
+  SIGNATURE_HEADER,
+  TIMESTAMP_HEADER,
 };

@@ -33,12 +33,22 @@ function getProviderInvoiceFeatures(providerKey) {
   return getProvider(providerKey).getInvoiceFeatures();
 }
 
+function listProviderAdapterContracts() {
+  return paymentProviderAdapters.map((adapter) => adapter.getAdapterContract());
+}
+
+function getProviderAdapterContract(providerKey) {
+  return getProvider(providerKey).getAdapterContract();
+}
+
 module.exports = {
   paymentProviderRegistry: {
     listProviders,
     getProvider,
     getProviderStatus,
     listInvoiceFeatures,
-    getProviderInvoiceFeatures
+    getProviderInvoiceFeatures,
+    listProviderAdapterContracts,
+    getProviderAdapterContract
   }
 };

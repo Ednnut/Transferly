@@ -1,6 +1,7 @@
 const { dispatchPaymentReconciliation, dispatchPayoutProcessing } = require('../jobs/dispatchers');
 const {
   adminAdjustUserPointsSchema,
+  adminReconcileUserPointsSchema,
   adminConfigUpdateSchema,
   adminFaqCreateSchema,
   adminFaqParamsSchema,
@@ -21,6 +22,8 @@ const {
   listAdminPayoutsQuerySchema,
   listTopUpOrdersQuerySchema,
   listDeadLetterJobsQuerySchema,
+  deadLetterJobParamsSchema,
+  deadLetterRecoverySchema,
   listRiskFlagsQuerySchema,
   listWebhookEventsQuerySchema,
   paymentOpsIssueActionSchema,
@@ -33,7 +36,9 @@ const {
   stripeConnectedAccountListQuerySchema,
   stripeConnectedAccountParamsSchema,
   topUpOrderAdminActionSchema,
-  topUpOrderParamsSchema
+  topUpOrderParamsSchema,
+  webhookEventActionSchema,
+  webhookEventParamsSchema
 } = require('../schemas/adminSchemas');
 const {
   presentAdminPayout,
@@ -44,9 +49,11 @@ const {
   presentInvoiceReminderConfiguration,
   presentInvoiceTemplate,
   presentPaymentOpsIssue,
+  presentProviderHealthReport,
   presentQueueOverview,
   presentRiskFlag,
-  presentWebhookEvent
+  presentWebhookEvent,
+  presentWebhookEventDetail
 } = require('../presenters/adminPresenter');
 const { invoiceRepository } = require('../repositories/invoiceRepository');
 const { payoutRepository } = require('../repositories/payoutRepository');
@@ -54,6 +61,7 @@ const { riskFlagRepository } = require('../repositories/riskFlagRepository');
 const { webhookEventRepository } = require('../repositories/webhookEventRepository');
 const { payoutParamsSchema, rejectPayoutSchema } = require('../schemas/payoutSchemas');
 const { adminContentService } = require('../services/adminContentService');
+const { adminWebhookService } = require('../services/adminWebhookService');
 const { auditLogService } = require('../services/auditLogService');
 const { opsService } = require('../services/opsService');
 const { paymentProviderRegistry } = require('../services/paymentProviderRegistry');
@@ -62,6 +70,7 @@ const { providerBalanceService } = require('../services/providerBalanceService')
 const { providerInvoiceService } = require('../services/providerInvoiceService');
 const { invoiceTemplateService } = require('../services/invoiceTemplateService');
 const { paymentOpsIssueService } = require('../services/paymentOpsIssueService');
+const { providerHealthService } = require('../services/providerHealthService');
 const { paypalPayoutService } = require('../services/paypalPayoutService');
 const { providerPayoutService } = require('../services/providerPayoutService');
 const { slipcraftUserService } = require('../services/slipcraftUserService');
@@ -77,8 +86,7 @@ async function approvePayoutController(request, response) {
       : await paypalPayoutService.approvePayout(request.params.id, request.adminActorId);
   const result = await dispatchPayoutProcessing(
     approval.payout_id,
-    'process-approved-payout',
-    `process-approved-payout:${approval.payout_id}`
+    'process-approved-payout'
   );
   response.json(result);
 }
@@ -200,6 +208,11 @@ async function listPaymentProvidersController(_request, response) {
   response.json({
     data: paymentProviderRegistry.listProviders()
   });
+}
+
+async function listPaymentProviderHealthController(_request, response) {
+  const report = await providerHealthService.getProviderHealthReport();
+  response.json(presentProviderHealthReport(report));
 }
 
 async function getPaymentProviderController(request, response) {
@@ -333,6 +346,40 @@ async function listWebhookEventsController(request, response) {
   });
 }
 
+async function getWebhookEventController(request, response) {
+  const params = webhookEventParamsSchema.parse(request.params || {});
+  const event = await adminWebhookService.getWebhookEvent(params.id);
+  response.json({
+    event: presentWebhookEventDetail(event)
+  });
+}
+
+async function replayWebhookEventController(request, response) {
+  const params = webhookEventParamsSchema.parse(request.params || {});
+  const body = webhookEventActionSchema.parse(request.body || {});
+  const event = await adminWebhookService.replayWebhookEvent({
+    webhookEventId: params.id,
+    adminActorId: request.adminActorId,
+    note: body.note
+  });
+  response.json({
+    event: presentWebhookEventDetail(event)
+  });
+}
+
+async function ignoreWebhookEventController(request, response) {
+  const params = webhookEventParamsSchema.parse(request.params || {});
+  const body = webhookEventActionSchema.parse(request.body || {});
+  const event = await adminWebhookService.ignoreWebhookEvent({
+    webhookEventId: params.id,
+    adminActorId: request.adminActorId,
+    note: body.note
+  });
+  response.json({
+    event: presentWebhookEventDetail(event)
+  });
+}
+
 async function listPaymentOpsIssuesController(request, response) {
   const query = listPaymentOpsIssuesQuerySchema.parse(request.query || {});
   const issues = await paymentOpsIssueService.listIssues(query);
@@ -387,6 +434,19 @@ async function listDeadLetterJobsController(request, response) {
   });
 }
 
+async function recoverDeadLetterJobController(request, response) {
+  const params = deadLetterJobParamsSchema.parse(request.params || {});
+  const body = deadLetterRecoverySchema.parse(request.body || {});
+  const result = await opsService.recoverDeadLetterJob(params.id, {
+    adminActorId: request.adminActorId,
+    note: body.note
+  });
+  response.json({
+    dead_letter: presentDeadLetterJob(result.dead_letter),
+    recovery: result.recovery
+  });
+}
+
 async function runPaymentReconciliationController(request, response) {
   const input = runPaymentReconciliationSchema.parse(request.body || {});
   const result = await dispatchPaymentReconciliation(input);
@@ -435,10 +495,29 @@ async function adjustAdminUserPointsController(request, response) {
     targetUserId: params.id,
     delta: body.delta,
     reason: body.reason,
-    adminActorId: request.adminActorId
+    adminActorId: request.adminActorId,
+    idempotencyKey: request.idempotencyKey
   });
 
   response.json({ user: presentAdminUser(user) });
+}
+
+async function getAdminUserPointReconciliationController(request, response) {
+  const params = adminUserIdParamsSchema.parse(request.params || {});
+  const reconciliation = await slipcraftUserService.getPointReconciliation(params.id);
+  response.json({ reconciliation });
+}
+
+async function reconcileAdminUserPointsController(request, response) {
+  const params = adminUserIdParamsSchema.parse(request.params || {});
+  const body = adminReconcileUserPointsSchema.parse(request.body || {});
+  const reconciliation = await slipcraftUserService.reconcilePointProjection({
+    targetUserId: params.id,
+    reason: body.reason,
+    adminActorId: request.adminActorId,
+    idempotencyKey: request.idempotencyKey
+  });
+  response.json({ reconciliation });
 }
 
 async function updateAdminConfigController(request, response) {
@@ -626,13 +705,20 @@ module.exports = {
   listPaymentOpsIssuesController,
   listRiskFlagsController,
   listWebhookEventsController,
+  getWebhookEventController,
+  ignoreWebhookEventController,
+  replayWebhookEventController,
   reopenPaymentOpsIssueController,
   resolvePaymentOpsIssueController,
   getQueueOverviewController,
+  listPaymentProviderHealthController,
   getPaymentProviderInvoiceFeaturesController,
   getPaymentProviderBalanceController,
   getPaymentProviderController,
+  getAdminUserPointReconciliationController,
   listDeadLetterJobsController,
+  recoverDeadLetterJobController,
+  reconcileAdminUserPointsController,
   listPaymentProviderInvoiceFeaturesController,
   listPaymentProvidersController,
   listStripeConnectedAccountsController,

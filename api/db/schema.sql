@@ -1,12 +1,37 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  checksum TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   display_name TEXT,
   country_code TEXT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'suspended', 'restricted', 'deleted')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  telegram_user_id TEXT NOT NULL,
+  telegram_exchange_hash TEXT NOT NULL UNIQUE,
+  current_token_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'revoked', 'expired')),
+  expires_at TEXT NOT NULL,
+  last_refreshed_at TEXT,
+  revoked_at TEXT,
+  revoke_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS wallets (
@@ -81,6 +106,54 @@ CREATE TABLE IF NOT EXISTS invoice_templates (
   is_active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS services (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  category TEXT NOT NULL,
+  description TEXT,
+  point_price INTEGER NOT NULL DEFAULT 0 CHECK (point_price >= 0),
+  badge TEXT,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'preview', 'sandbox', 'active', 'maintenance', 'disabled')),
+  generator_key TEXT,
+  generator_version TEXT,
+  input_schema_json TEXT NOT NULL DEFAULT '{}',
+  output_type TEXT,
+  configuration_json TEXT NOT NULL DEFAULT '{}',
+  permissions_json TEXT NOT NULL DEFAULT '[]',
+  queue_behavior_json TEXT NOT NULL DEFAULT '{}',
+  retention_days INTEGER CHECK (retention_days IS NULL OR retention_days >= 0),
+  execution_mode TEXT NOT NULL DEFAULT 'production' CHECK (execution_mode IN ('production', 'sandbox', 'training')),
+  version TEXT NOT NULL DEFAULT '1',
+  feature_flag TEXT,
+  receipt_type TEXT,
+  is_payment_provider INTEGER NOT NULL DEFAULT 0,
+  display_order INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS service_templates (
+  id TEXT PRIMARY KEY,
+  service_id TEXT NOT NULL,
+  template_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  receipt_type TEXT,
+  cost_points INTEGER,
+  input_schema_json TEXT NOT NULL DEFAULT '{}',
+  renderer_config_json TEXT NOT NULL DEFAULT '{}',
+  preview_asset TEXT,
+  version TEXT NOT NULL DEFAULT '1',
+  metadata_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+  UNIQUE (service_id, template_key)
 );
 
 CREATE TABLE IF NOT EXISTS payout_batches (
@@ -202,6 +275,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   user_id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   is_admin INTEGER NOT NULL DEFAULT 0,
+  role TEXT NOT NULL DEFAULT 'USER',
   points INTEGER NOT NULL DEFAULT 0,
   referral_code TEXT NOT NULL UNIQUE,
   referred_by_user_id TEXT,
@@ -298,12 +372,178 @@ CREATE TABLE IF NOT EXISTS receipts (
 
 CREATE TABLE IF NOT EXISTS points_transactions (
   id TEXT PRIMARY KEY,
+  entry_key TEXT UNIQUE,
   user_id TEXT NOT NULL,
   type TEXT NOT NULL,
   amount INTEGER NOT NULL,
   description TEXT NOT NULL,
+  reference_type TEXT,
+  reference_id TEXT,
+  balance_after INTEGER,
   metadata_json TEXT,
   created_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS point_reservations (
+  id TEXT PRIMARY KEY,
+  reservation_key TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  available_points_before INTEGER NOT NULL,
+  available_points_after INTEGER NOT NULL,
+  reference_type TEXT NOT NULL,
+  reference_id TEXT,
+  metadata_json TEXT,
+  reserved_at TEXT NOT NULL,
+  expires_at TEXT,
+  committed_at TEXT,
+  released_at TEXT,
+  expired_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  service_id TEXT NOT NULL,
+  service_slug TEXT NOT NULL,
+  service_template_id TEXT,
+  service_template_key TEXT,
+  status TEXT NOT NULL,
+  point_cost INTEGER NOT NULL DEFAULT 0,
+  point_reservation_id TEXT,
+  input_json TEXT NOT NULL DEFAULT '{}',
+  output_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  failure_code TEXT,
+  failure_message TEXT,
+  queue_status TEXT NOT NULL DEFAULT 'pending',
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  queued_at TEXT,
+  processing_started_at TEXT,
+  completed_at TEXT,
+  cancelled_at TEXT,
+  failed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE RESTRICT,
+  FOREIGN KEY (service_template_id) REFERENCES service_templates(id) ON DELETE SET NULL,
+  FOREIGN KEY (point_reservation_id) REFERENCES point_reservations(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS idempotency_records (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  response_status INTEGER,
+  response_payload TEXT,
+  expires_at TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  UNIQUE (user_id, operation, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS order_events (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  previous_status TEXT,
+  next_status TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  actor_type TEXT NOT NULL,
+  actor_id TEXT,
+  reason TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS order_attempts (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  dispatch_generation INTEGER NOT NULL,
+  attempt_number INTEGER NOT NULL,
+  job_id TEXT,
+  correlation_id TEXT NOT NULL,
+  lock_token TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  lock_expires_at TEXT NOT NULL,
+  finished_at TEXT,
+  failure_code TEXT,
+  failure_message TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+  UNIQUE (order_id, dispatch_generation, attempt_number)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_order_attempts_active_order
+ON order_attempts (order_id)
+WHERE status = 'processing';
+
+CREATE INDEX IF NOT EXISTS idx_order_attempts_order_history
+ON order_attempts (order_id, attempt_number, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_order_attempts_stale_scan
+ON order_attempts (status, lock_expires_at);
+
+CREATE TABLE IF NOT EXISTS dead_letter_records (
+  id TEXT PRIMARY KEY,
+  source_key TEXT NOT NULL UNIQUE,
+  source_queue TEXT NOT NULL,
+  source_job_id TEXT,
+  dead_letter_job_id TEXT UNIQUE,
+  job_name TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  failure_code TEXT,
+  failure_message TEXT NOT NULL,
+  failure_classification TEXT NOT NULL,
+  retryable INTEGER NOT NULL,
+  attempts_made INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  correlation_id TEXT,
+  failed_at TEXT NOT NULL,
+  recovery_started_at TEXT,
+  recovery_token TEXT UNIQUE,
+  recovered_at TEXT,
+  recovered_by_actor_id TEXT,
+  recovery_note TEXT,
+  recovery_job_id TEXT,
+  recovery_job_name TEXT,
+  last_recovery_error TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letter_records_status_failed
+ON dead_letter_records (status, failed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letter_records_source
+ON dead_letter_records (source_queue, source_job_id);
+
+CREATE TABLE IF NOT EXISTS generated_assets (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  asset_type TEXT NOT NULL,
+  storage_key TEXT NOT NULL UNIQUE,
+  mime_type TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  checksum TEXT NOT NULL,
+  classification TEXT NOT NULL,
+  expires_at TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
@@ -365,6 +605,8 @@ CREATE TABLE IF NOT EXISTS telegram_accounts (
   username TEXT,
   first_name TEXT,
   last_name TEXT,
+  language_code TEXT,
+  last_authenticated_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
@@ -387,6 +629,12 @@ CREATE INDEX IF NOT EXISTS idx_ledger_entries_reference
   ON ledger_entries (reference_type, reference_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_user_created_at
   ON invoices (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_services_category_status
+  ON services (category, status);
+CREATE INDEX IF NOT EXISTS idx_services_status_order
+  ON services (status, display_order);
+CREATE INDEX IF NOT EXISTS idx_service_templates_service_status
+  ON service_templates (service_id, status);
 CREATE INDEX IF NOT EXISTS idx_payouts_user_created_at
   ON payouts (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_payouts_receiver_created_at
@@ -411,6 +659,32 @@ CREATE INDEX IF NOT EXISTS idx_receipts_user_created_at
   ON receipts (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_points_transactions_user_created_at
   ON points_transactions (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_point_reservations_user_created_at
+  ON point_reservations (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_point_reservations_status_updated_at
+  ON point_reservations (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_point_reservations_reference
+  ON point_reservations (reference_type, reference_id);
+CREATE INDEX IF NOT EXISTS idx_orders_user_created_at
+  ON orders (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_status_updated_at
+  ON orders (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_orders_service_created_at
+  ON orders (service_slug, created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_user_idempotency
+  ON orders (user_id, idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_idempotency_records_user_created_at
+  ON idempotency_records (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_idempotency_records_expires_at
+  ON idempotency_records (expires_at);
+CREATE INDEX IF NOT EXISTS idx_order_events_order_created_at
+  ON order_events (order_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_generated_assets_order_created_at
+  ON generated_assets (order_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_generated_assets_user_created_at
+  ON generated_assets (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_generated_assets_expires_at
+  ON generated_assets (expires_at);
 CREATE INDEX IF NOT EXISTS idx_top_up_orders_user_created_at
   ON top_up_orders (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_top_up_orders_status_created_at
@@ -423,3 +697,7 @@ CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_id
   ON telegram_accounts (user_id);
 CREATE INDEX IF NOT EXISTS idx_telegram_command_logs_user_created_at
   ON telegram_command_logs (telegram_user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_status
+  ON auth_sessions (user_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_status_expires_at
+  ON auth_sessions (status, expires_at);

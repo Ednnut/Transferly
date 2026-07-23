@@ -1,15 +1,31 @@
 const crypto = require('crypto');
 const config = require('../config');
+const logger = require('./logger');
 const { ensureSession } = require('./sessionState');
 
 const DEFAULT_CALLBACK_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_DEDUPE_TTL_MS = 8000;
 const SIGN_PREFIX = 'cb';
+const CALLBACK_REF_PREFIX = 'REF';
 const MENU_ACTION_LOG_INTERVAL = 25;
 const MENU_ACTIONS = new Set([
   'MENU',
   'BACK',
+  'HELP',
+  'SUPPORT',
+  'SUPPORT_ACCOUNT',
+  'SUPPORT_PAYMENT',
+  'SUPPORT_TECHNICAL',
+  'SUPPORT_CONTACT',
+  'TERMS',
+  'PRIVACY',
   'SERVICES',
+  'PROVIDERS',
+  'MENU_COLLECT',
+  'MENU_SEND',
+  'MENU_ACCOUNT',
+  'MENU_ADMIN',
+  'MENU_SUPPORT',
   'BALANCE',
   'RECEIPTS',
   'PROFILE',
@@ -29,6 +45,10 @@ const MENU_ACTIONS = new Set([
   'PP:PO_SEARCH',
   'INVOICES',
   'PAYOUTS',
+  'ACTIVITY',
+  'CLIENTS',
+  'RISK',
+  'SECURITY',
   'OPS',
   'ISSUES',
   'ORDERS',
@@ -76,23 +96,72 @@ function signPayload(payload) {
   return crypto.createHmac('sha256', secret).update(payload).digest('hex').slice(0, 8);
 }
 
+function signedCallbackData(action, token, ts) {
+  const payload = `${action}|${token}|${ts}`;
+  const sig = signPayload(payload);
+  return `${SIGN_PREFIX}|${action}|${token}|${ts}|${sig}`;
+}
+
+function cleanupCallbackRegistry(ctx, now = Date.now()) {
+  ensureSession(ctx);
+  const registry =
+    ctx.session.callbackRegistry && typeof ctx.session.callbackRegistry === 'object'
+      ? ctx.session.callbackRegistry
+      : {};
+  let removed = 0;
+  Object.entries(registry).forEach(([key, entry]) => {
+    if (!entry || typeof entry !== 'object' || (entry.expiresAt && entry.expiresAt <= now)) {
+      delete registry[key];
+      removed += 1;
+    }
+  });
+  ctx.session.callbackRegistry = registry;
+  if (removed > 0) {
+    logger.info('Expired callback references cleaned', {
+      removed,
+      remaining: Object.keys(registry).length,
+    });
+  }
+  return registry;
+}
+
+function storeCallbackReference(ctx, action, expiresAt) {
+  const registry = cleanupCallbackRegistry(ctx);
+  const id = crypto.randomBytes(6).toString('base64url');
+  registry[id] = { action, expiresAt };
+  return `${CALLBACK_REF_PREFIX}:${id}`;
+}
+
+function resolveCallbackReference(ctx, action) {
+  const value = String(action || '');
+  if (!value.startsWith(`${CALLBACK_REF_PREFIX}:`)) {
+    return { status: 'ok', action: value };
+  }
+  const id = value.slice(CALLBACK_REF_PREFIX.length + 1);
+  const entry = cleanupCallbackRegistry(ctx)[id];
+  if (!entry?.action) {
+    return { status: 'expired', reason: 'reference', action: value };
+  }
+  return { status: 'ok', action: entry.action };
+}
+
 function buildCallbackData(ctx, action, options = {}) {
   const safeAction = String(action || '');
   if (!safeAction) {
     return '';
   }
-  const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : DEFAULT_CALLBACK_TTL_MS;
+  const ttlMs = Number.isFinite(options.ttlMs) && options.ttlMs > 0 ? options.ttlMs : DEFAULT_CALLBACK_TTL_MS;
   ensureSession(ctx);
   const token = options.token || ctx.session?.currentOp?.token || '';
   const ts = options.timestamp || Date.now();
-  const payload = `${safeAction}|${token}|${ts}`;
-  const sig = signPayload(payload);
-  const data = `${SIGN_PREFIX}|${safeAction}|${token}|${ts}|${sig}`;
+  const expiresAt = ts + ttlMs;
+  let data = signedCallbackData(safeAction, token, ts);
   if (data.length > 64) {
-    return safeAction;
-  }
-  if (ttlMs <= 0) {
-    return safeAction;
+    const referenceAction = storeCallbackReference(ctx, safeAction, expiresAt);
+    data = signedCallbackData(referenceAction, token, ts);
+    if (data.length > 64) {
+      return referenceAction;
+    }
   }
   return data;
 }
@@ -149,7 +218,7 @@ function validateCallback(ctx, rawAction, options = {}) {
     if (parsed.token && currentToken && parsed.token !== currentToken) {
       return { status: 'stale', reason: 'token_mismatch', action: parsed.action };
     }
-    return { status: 'ok', action: parsed.action };
+    return resolveCallbackReference(ctx, parsed.action);
   }
 
   const legacyToken = extractLegacyOpToken(rawAction);
@@ -161,7 +230,7 @@ function validateCallback(ctx, rawAction, options = {}) {
   if (startedAt && now - startedAt > ttlMs) {
     return { status: 'expired', reason: 'ttl', action: parsed.action };
   }
-  return { status: 'ok', action: parsed.action };
+  return resolveCallbackReference(ctx, parsed.action);
 }
 
 function matchesCallbackPrefix(rawAction, prefix) {
@@ -219,7 +288,7 @@ function finishActionMetric(metric, status = 'ok', extra = {}) {
     op_id: metric.opId,
     ...extra
   };
-  console.log(JSON.stringify(payload));
+  logger.info('Bot action metric', payload);
   if (metric?.name === 'callback' && metric?.raw_action) {
     const parsed = parseCallbackData(metric.raw_action);
     const action = parsed.action || metric.raw_action;
@@ -242,7 +311,7 @@ function finishActionMetric(metric, status = 'ok', extra = {}) {
           .slice(0, 5)
           .map((row) => `${row.action}: ${row.errorRate}% (${row.total})`)
           .join(' | ');
-        console.log(`📊 Menu action health: ${summary}`);
+        logger.info('Bot menu action health', { summary });
       }
     }
   }
@@ -252,6 +321,7 @@ module.exports = {
   buildCallbackData,
   parseCallbackData,
   validateCallback,
+  cleanupCallbackRegistry,
   matchesCallbackPrefix,
   isDuplicateAction,
   startActionMetric,

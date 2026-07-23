@@ -7,7 +7,7 @@ export default [
   },
   js.configs.recommended,
   {
-    files: ['slipcrafts/**/*.js', 'slipcrafts/**/*.jsx'],
+    files: ['miniapp/**/*.js', 'miniapp/**/*.jsx'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
@@ -41,7 +41,7 @@ export default [
   },
   {
     files: ['**/*.js', '**/*.cjs'],
-    ignores: ['slipcrafts/**/*.js'],
+    ignores: ['miniapp/**/*.js'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'commonjs',

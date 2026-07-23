@@ -3,6 +3,7 @@ const { profileRepository } = require('../repositories/profileRepository');
 const { telegramRepository } = require('../repositories/telegramRepository');
 const { userRepository } = require('../repositories/userRepository');
 const { AppError } = require('../utils/errors');
+const { pointLedgerService } = require('./pointLedgerService');
 const { referralService } = require('./referralService');
 const { slipcraftReceiptService } = require('./slipcraftReceiptService');
 const { slipcraftUserService } = require('./slipcraftUserService');
@@ -14,6 +15,30 @@ function parseTelegramCommand(text) {
     command: rawCommand || '',
     args: parts,
     rawArgs: parts.join(' ')
+  };
+}
+
+function buildMiniAppUrl(_section = 'home') {
+  const url = new URL(config.TELEGRAM_MINI_APP_URL);
+  if (url.pathname === '/' && !url.search && !url.hash) {
+    return url.origin;
+  }
+  return url.toString();
+}
+
+function buildMiniAppLaunchPayload() {
+  const launchUrl = buildMiniAppUrl('dashboard');
+  const launchButtons = [
+    { text: 'Open Transferly', section: 'dashboard', url: launchUrl }
+  ];
+
+  return {
+    launch_buttons: launchButtons,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: 'Open Transferly', web_app: { url: launchUrl } }]
+      ]
+    }
   };
 }
 
@@ -66,13 +91,29 @@ async function handleGenerateReceipt(account, parsedCommand) {
   const type = parsedCommand.args[0] || 'bank';
   const rawDetails = parsedCommand.args.slice(1).join(' ');
   const details = parseReceiptDetails(rawDetails);
-  const result = await slipcraftReceiptService.generateReceipt({
-    userId: account.userId,
-    type,
-    title: `Telegram ${String(type).toUpperCase()} Receipt`,
-    summary: 'Generated from Telegram bot.',
-    details
-  });
+  let result;
+  try {
+    result = await slipcraftReceiptService.generateReceipt({
+      userId: account.userId,
+      serviceSlug: details.service,
+      type,
+      title: `Telegram ${String(type).toUpperCase()} Test Record`,
+      summary: 'Generated from Telegram bot sandbox tooling.',
+      details
+    });
+  } catch (error) {
+    if (error?.code === 'LEGACY_RECEIPT_GENERATION_DISABLED') {
+      return {
+        ok: false,
+        message: error.message,
+        data: {
+          code: error.code,
+          next_step: 'Use the verified transaction-record order flow or the faker-data sandbox service.'
+        }
+      };
+    }
+    throw error;
+  }
 
   return {
     ok: true,
@@ -122,7 +163,10 @@ async function handleReferral(account) {
 
 async function handleProfile(account) {
   const user = await resolveLinkedUser(account);
-  const profile = await profileRepository.findByUserId(user.id);
+  const [profile, points] = await Promise.all([
+    profileRepository.findByUserId(user.id),
+    pointLedgerService.getBalance(user.id)
+  ]);
 
   return {
     ok: true,
@@ -131,15 +175,56 @@ async function handleProfile(account) {
       user_id: user.id,
       email: user.email,
       name: profile.name,
-      points: profile.points,
+      points,
       referral_code: profile.referralCode,
       telegram_username: profile.telegramUsername
     }
   };
 }
 
+async function handleMiniAppLaunch() {
+  return {
+    ok: true,
+    message: 'Open Transferly in the Telegram Mini App for your dashboard, provider workspaces, support, and account tools.',
+    data: buildMiniAppLaunchPayload()
+  };
+}
+
+async function handleMiniAppSection(section, message) {
+  return {
+    ok: true,
+    message,
+    data: {
+      section,
+      url: buildMiniAppUrl(section),
+      ...buildMiniAppLaunchPayload()
+    }
+  };
+}
+
 async function dispatchCommand(account, parsedCommand) {
   switch (parsedCommand.command) {
+    case '/start':
+    case '/menu':
+    case '/miniapp':
+      return handleMiniAppLaunch();
+    case '/providers':
+      return handleMiniAppSection('dashboard', 'Open the Transferly provider cockpit in the Mini App.');
+    case '/invoices':
+      return handleMiniAppSection('invoices', 'Open Transferly invoices in the Mini App.');
+    case '/payouts':
+      return handleMiniAppSection('payouts', 'Open Transferly payouts in the Mini App.');
+    case '/activity':
+      return handleMiniAppSection('activity', 'Open Transferly activity in the Mini App.');
+    case '/analytics':
+      return handleMiniAppSection('analytics', 'Open Transferly analytics in the Mini App.');
+    case '/clients':
+      return handleMiniAppSection('clients', 'Open Transferly clients in the Mini App.');
+    case '/risk':
+      return handleMiniAppSection('risk', 'Open Transferly risk review in the Mini App.');
+    case '/security':
+    case '/status':
+      return handleMiniAppSection('security', 'Open Transferly security and status in the Mini App.');
     case '/balance':
       await resolveLinkedUser(account);
       return handleBalance(account);
@@ -211,6 +296,8 @@ async function handleWebhook(update) {
 
 module.exports = {
   telegramBotService: {
-    handleWebhook
+    handleWebhook,
+    buildMiniAppUrl,
+    buildMiniAppLaunchPayload
   }
 };

@@ -204,6 +204,25 @@ function configureHttpKernel(app) {
     response.json(buildClientHealthPayload(request));
   });
 
+  // Discover and initialize provider modules (non-destructive)
+  try {
+    const ProviderRegistry = require('../providers/registry');
+    const providerDir = require('path').join(__dirname, '..', 'providers');
+    const registry = new ProviderRegistry({ logger });
+    registry.discover(providerDir);
+    app.locals.providerRegistry = registry;
+
+    // Attempt to call init on each provider if provided
+    registry.list().forEach((p) => {
+      if (typeof p.init === 'function') {
+        // best-effort init
+        p.init().catch((err) => logger.warn({ err }, `Provider ${p.id} init failed`));
+      }
+    });
+  } catch (err) {
+    logger.warn({ err }, 'Provider discovery failed (continuing without providers)');
+  }
+
   registerRoutes(app);
 
   app.use(notFoundHandler);

@@ -7,10 +7,21 @@ const https = require('https');
 
 const token = process.env.BOT_TOKEN;
 const chatId = process.env.SMOKE_CHAT_ID || process.env.ADMIN_TELEGRAM_ID;
+const miniAppUrl = process.env.MINI_APP_URL || process.env.WEB_APP_URL || process.env.FRONTEND_URL;
+const dryRun = process.argv.includes('--dry-run');
 
-if (!token || !chatId) {
+if ((!token || !chatId) && !dryRun) {
   console.error('Missing BOT_TOKEN or SMOKE_CHAT_ID/ADMIN_TELEGRAM_ID.');
   process.exit(1);
+}
+
+function miniAppDashboardUrl() {
+  if (!miniAppUrl) return '';
+  const url = new URL(miniAppUrl);
+  if (url.pathname === '/' && !url.search && !url.hash) {
+    return url.origin;
+  }
+  return url.toString();
 }
 
 function apiRequest(method, payload = null) {
@@ -51,42 +62,62 @@ function callback(action) {
 }
 
 async function main() {
-  const me = await apiRequest('getMe');
+  const me = dryRun ? { username: 'transferly_dry_run_bot' } : await apiRequest('getMe');
+  const dashboardUrl = miniAppDashboardUrl();
   const text = [
     '<b>Transferly Bot Live Smoke</b>',
     '',
     `Bot: @${me.username || me.first_name}`,
     '',
     'Manual tap path:',
-    '1. Tap Users',
-    '2. Tap Search Users',
-    '3. Search a Telegram ID or username',
-    '4. Open a user detail card',
-    '5. Tap Back / Users / Main Menu',
+    '1. Tap Open Transferly',
+    '2. Confirm the Telegram Mini App opens on the home/dashboard page',
+    '3. Return to Telegram and tap Help',
+    '4. Tap Support and confirm support categories are shown',
+    '5. Tap Status and confirm a simple service status is shown',
+    '6. Tap Start and confirm it returns to the launcher',
     '',
-    'Telegram does not let a bot click its own inline buttons, so this smoke script verifies token/chat delivery and sends signed buttons for live operator tap-through.',
+    'Telegram does not let a bot click its own inline buttons, so this smoke script verifies token/chat delivery and sends minimal operator tap-through buttons.',
   ].join('\n');
+  const inlineKeyboard = [
+    [
+      dashboardUrl
+        ? { text: '🚀 Open Transferly', web_app: { url: dashboardUrl } }
+        : { text: '🚀 Open Transferly', callback_data: callback('MINI_APP') },
+    ],
+    [
+      { text: 'Help', callback_data: callback('HELP') },
+      { text: 'Support', callback_data: callback('SUPPORT') },
+    ],
+    [
+      { text: 'Status', callback_data: callback('STATUS') },
+      { text: 'Terms', callback_data: callback('TERMS') },
+      { text: 'Privacy', callback_data: callback('PRIVACY') },
+    ],
+    [
+      { text: 'Start', callback_data: callback('MENU') },
+    ],
+  ];
 
-  const result = await apiRequest('sendMessage', {
+  const payload = {
     chat_id: chatId,
     text,
     parse_mode: 'HTML',
     reply_markup: {
-      inline_keyboard: [
-        [
-          { text: 'Users', callback_data: callback('USERS') },
-          { text: 'Search Users', callback_data: callback('USERS_SEARCH') },
-        ],
-        [
-          { text: 'Analytics', callback_data: callback('BOT_ANALYTICS') },
-          { text: 'Payment Audit', callback_data: callback('PAYMENT_AUDIT') },
-        ],
-        [
-          { text: 'Main Menu', callback_data: callback('MENU') },
-        ],
-      ],
-    },
-  });
+        inline_keyboard: inlineKeyboard,
+      },
+  };
+
+  if (dryRun) {
+    console.log(JSON.stringify({
+      ok: true,
+      dry_run: true,
+      payload,
+    }, null, 2));
+    return;
+  }
+
+  const result = await apiRequest('sendMessage', payload);
 
   console.log(JSON.stringify({
     ok: true,

@@ -1,8 +1,16 @@
 const axios = require('axios');
+const { randomUUID } = require('crypto');
 const config = require('../config');
+const {
+  ADMIN_AUTH_HEADER,
+  IDEMPOTENCY_HEADER,
+  REQUEST_ID_HEADER,
+  validateApiResponseContract,
+} = require('./apiContract');
+const logger = require('./logger');
 
 const DEFAULT_TIMEOUT_MS = 12000;
-const ADMIN_HEADER = 'Authorization';
+const IDEMPOTENT_METHODS = new Set(['get', 'head', 'options', 'delete']);
 const ADMIN_ORIGINS = new Set();
 try {
   if (config.apiUrl) {
@@ -78,16 +86,38 @@ function shouldAttachAdmin(url) {
 
 function withAdminHeader(headers = {}, enableAdmin = true) {
   const merged = { ...headers };
-  if (enableAdmin && config.admin?.apiToken && !merged[ADMIN_HEADER]) {
-    merged[ADMIN_HEADER] = `Bearer ${config.admin.apiToken}`;
+  if (enableAdmin && config.admin?.apiToken && !merged[ADMIN_AUTH_HEADER]) {
+    merged[ADMIN_AUTH_HEADER] = `Bearer ${config.admin.apiToken}`;
   }
   return merged;
+}
+
+function getContextRequestId(ctx) {
+  return (
+    ctx?.session?.currentOp?.id ||
+    ctx?.session?.meta?.requestId ||
+    (ctx?.update?.update_id ? `tg-update-${ctx.update.update_id}` : null) ||
+    null
+  );
+}
+
+function shouldRetryMethod(method, options = {}) {
+  if (options.retry) return options.retry;
+  if (IDEMPOTENT_METHODS.has(method)) return { retries: 2 };
+  if (options.idempotencyKey) return { retries: 1 };
+  return { retries: 0 };
 }
 
 function normalizeOptions(options = {}, url) {
   const enableAdmin = options.admin !== false && shouldAttachAdmin(url);
   const headers = withAdminHeader(options.headers || {}, enableAdmin);
   const timeout = Number.isFinite(options.timeout) ? options.timeout : DEFAULT_TIMEOUT_MS;
+  if (options.requestId && !headers[REQUEST_ID_HEADER]) {
+    headers[REQUEST_ID_HEADER] = options.requestId;
+  }
+  if (options.idempotencyKey && !headers[IDEMPOTENCY_HEADER]) {
+    headers[IDEMPOTENCY_HEADER] = options.idempotencyKey;
+  }
   return {
     ...options,
     headers,
@@ -152,7 +182,7 @@ function enrichError(error, context = {}) {
 function logError(error, context = {}) {
   const enriched = enrichError(error, context);
   const apiContext = enriched?.apiContext || {};
-  console.error('API request failed', apiContext);
+  logger.error('API request failed', apiContext);
 }
 
 function getUserMessage(error, fallback = 'API request failed.') {
@@ -160,23 +190,34 @@ function getUserMessage(error, fallback = 'API request failed.') {
   return error.userMessage || mapErrorToUserMessage(error) || fallback;
 }
 
+function validateResponseContract(response, contract, context = {}) {
+  if (contract) {
+    validateApiResponseContract(response?.data, contract, context);
+  }
+  return response;
+}
+
 async function request(method, ctx, url, data, options = {}) {
-  const normalized = normalizeOptions(options, url);
-  const { retry, admin, ...axiosOptions } = normalized;
+  const requestId = options.requestId || getContextRequestId(ctx) || randomUUID();
+  const normalized = normalizeOptions({ ...options, requestId }, url);
+  const retry = shouldRetryMethod(method, normalized);
+  const { retry: _retry, admin: _admin, requestId: _requestId, idempotencyKey: _idempotencyKey, contract, ...axiosOptions } = normalized;
+  const context = { method: method.toUpperCase(), url, requestId };
   try {
+    let response;
     if (method === 'get') {
-      return await withRetry(() => axios.get(url, axiosOptions), retry);
+      response = await withRetry(() => axios.get(url, axiosOptions), retry);
+    } else if (method === 'delete') {
+      response = await withRetry(() => axios.delete(url, axiosOptions), retry);
+    } else if (method === 'put') {
+      response = await withRetry(() => axios.put(url, data, axiosOptions), retry);
+    } else {
+      response = await withRetry(() => axios.post(url, data, axiosOptions), retry);
     }
-    if (method === 'delete') {
-      return await withRetry(() => axios.delete(url, axiosOptions), retry);
-    }
-    if (method === 'put') {
-      return await withRetry(() => axios.put(url, data, axiosOptions), retry);
-    }
-    return await withRetry(() => axios.post(url, data, axiosOptions), retry);
+    return validateResponseContract(response, contract, context);
   } catch (error) {
-    logError(error, { method: method.toUpperCase(), url });
-    const enriched = enrichError(error, { method: method.toUpperCase(), url });
+    logError(error, context);
+    const enriched = enrichError(error, context);
     if (enriched?.userMessage && typeof enriched.message === 'string' && /request failed/i.test(enriched.message)) {
       enriched.message = enriched.userMessage;
     }
@@ -204,6 +245,7 @@ module.exports = {
   withRetry,
   getUserMessage,
   mapErrorToUserMessage,
+  extractRequestId,
   sanitizeUrl,
   get,
   post,

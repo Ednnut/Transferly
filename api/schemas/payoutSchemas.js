@@ -21,6 +21,7 @@ const payoutParamsSchema = z.object({
 });
 
 const listPayoutsQuerySchema = z.object({
+  provider: z.enum(['paypal', 'stripe', 'wise', 'paystack', 'flutterwave', 'crypto']).optional(),
   status: z.string().trim().min(1).optional(),
   riskDecision: z.string().trim().min(1).optional(),
   recipient: z.string().trim().min(1).optional(),

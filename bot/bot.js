@@ -8,11 +8,24 @@ try {
   throw error;
 }
 
-const { Bot, InlineKeyboard, InputFile, session } = grammyPkg;
+const { Bot, InlineKeyboard, InputFile, session, webhookCallback } = grammyPkg;
 const axios = require("axios");
+const http = require("http");
 const net = require("net");
 const { randomUUID } = require("crypto");
 const httpClient = require("./utils/httpClient");
+const logger = require("./utils/logger");
+const { createRateLimiter } = require("./utils/rateLimit");
+const { createUpdateDeduper } = require("./utils/updateDeduper");
+const { buildRuntimeStatus } = require("./utils/runtimeStatus");
+const {
+  buildApiUrl,
+  contractShapes,
+  createMutationIdempotencyKey,
+  PROVIDER_CONTRACT_VERSION,
+  providerRoutes,
+  validateApiResponseContract,
+} = require("./utils/apiContract");
 const config = require("./config");
 const { registerCommands } = require("./commands");
 const { registerCallbackRouter } = require("./callbacks");
@@ -28,7 +41,13 @@ const {
   getCommandCapability,
   getActionCapability,
 } = require("./utils/capabilities");
-const { initialSessionState, ensureSession, resetSession } = require("./utils/sessionState");
+const {
+  initialSessionState,
+  ensureSession,
+  ensureFlow,
+  resetSession,
+  rememberProviderContext,
+} = require("./utils/sessionState");
 const {
   SERVICE_GROUPS,
   getService,
@@ -37,7 +56,17 @@ const {
   canGenerateService,
   getServiceGroupId,
   serviceSummary,
+  getServiceCommandCenter,
+  getServiceLane,
 } = require("./utils/serviceCatalog");
+const {
+  listProviderWorkspaces,
+  getProviderWorkspace,
+  getProviderLanes,
+  getProviderLane,
+  getProviderLaneStatus: getManifestProviderLaneStatus,
+  findProviderLanesByIntent,
+} = require("./utils/providerWorkspaces");
 const {
   addUser,
   getUser,
@@ -68,6 +97,7 @@ const {
   readBotSession,
   writeBotSession,
   deleteBotSession,
+  cleanupExpiredBotSessions,
 } = require("./db/db");
 
 const apiOrigins = new Set();
@@ -82,14 +112,47 @@ attachHmacAuth(axios, {
 });
 
 const bot = new Bot(config.botToken);
+const updateRateLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 30 });
+const updateDeduper = createUpdateDeduper({
+  ttlMs: config.runtime.updateDedupeTtlMs,
+  maxEntries: config.runtime.updateDedupeMaxEntries,
+});
+
+const PRIMARY_MINI_APP_LABEL = "🚀 Open Transferly";
+const BOT_UX_BOUNDARY = Object.freeze({
+  purpose: "welcome_navigation_support_mini_app_launcher",
+  primaryMiniAppSection: "dashboard",
+  visibleCommands: Object.freeze(["start", "help", "support", "status", "terms", "privacy"]),
+  miniAppOwnedAreas: Object.freeze([
+    "dashboard",
+    "services",
+    "payments",
+    "wallet",
+    "settings",
+    "advanced workflows",
+  ]),
+});
+const BOT_NAV_LABELS = Object.freeze({
+  help: "Help",
+  support: "Support",
+  status: "Status",
+  terms: "Terms",
+  privacy: "Privacy",
+  mainMenu: "Start",
+  contactAdmin: "Contact Admin",
+  supportAccount: "Account Help",
+  supportPayment: "Payment Help",
+  supportTechnical: "Technical Issue",
+  supportContact: "Contact Support",
+});
 
 const TELEGRAM_COMMANDS = [
-  { command: "start", description: "Open the Transferly bot" },
-  { command: "menu", description: "Show Transferly actions" },
-  { command: "help", description: "How to use Transferly bot" },
-  { command: "services", description: "Browse Transferly services" },
-  { command: "whoami", description: "Show your bot access" },
-  { command: "cancel", description: "Cancel the current bot prompt" },
+  { command: "start", description: "Welcome and open Transferly" },
+  { command: "help", description: "How to use Transferly" },
+  { command: "support", description: "Get support options" },
+  { command: "status", description: "Check service status" },
+  { command: "terms", description: "View terms" },
+  { command: "privacy", description: "View privacy information" },
 ];
 
 const MENU_TTL_MS = 15 * 60 * 1000;
@@ -105,12 +168,92 @@ const SCREEN_TYPES = Object.freeze({
   CONFIRM: "confirm",
   RESULT: "result",
 });
-const PAYMENT_PROVIDER_SLUGS = new Set(["paypal", "stripe", "wise", "paystack", "flutterwave", "crypto"]);
+const PAYMENT_PROVIDER_SLUGS = new Set(listProviderWorkspaces().map((provider) => provider.slug));
+const COMMAND_SECTION_ACTIONS = new Set(["MENU_COLLECT", "MENU_SEND", "MENU_ACCOUNT", "MENU_ADMIN", "MENU_SUPPORT"]);
+const MINI_APP_DELEGATED_ACTIONS = new Set([
+  "SERVICES",
+  "PROVIDERS",
+  "MENU_COLLECT",
+  "MENU_SEND",
+  "MENU_ACCOUNT",
+  "MENU_ADMIN",
+  "PROFILE",
+  "BALANCE",
+  "RECEIPTS",
+  "REFERRAL",
+  "INVOICES",
+  "PAYOUTS",
+  "OPS",
+  "ACTIVITY",
+  "CLIENTS",
+  "RISK",
+  "SECURITY",
+  "ISSUES",
+  "ORDERS",
+  "RECONCILE",
+  "BOT_OPS",
+  "BOT_ANALYTICS",
+  "SUBSCRIPTION_ALERTS",
+  "PAYMENT_AUDIT",
+  "SEARCH:SERVICE",
+  "PP:HOME",
+  "PP:EMAIL",
+  "PP:INV",
+  "PP:INV_SEARCH",
+  "PP:PO",
+  "PP:PO_SEARCH",
+  "USERS",
+]);
+const MINI_APP_DELEGATED_PREFIXES = [
+  "GROUP:",
+  "SERVICE:",
+  "SERVICE_ACTION:",
+  "SERVICE_LANE:",
+  "PROVIDER:",
+  "PROVIDER_CUSTOM:",
+  "PROVIDER_LANE:",
+  "PROVIDER_INV:",
+  "PROVIDER_PO:",
+  "PROVIDER_BAL:",
+  "PROVIDER_WEBHOOKS:",
+  "PROVIDER_ISSUES:",
+  "RUN:",
+  "CUSTOM:",
+  "HISTORY:",
+  "INFO:",
+  "PP:INV_",
+  "PP:PO_",
+  "PAY_AUDIT_F:",
+  "ALERT_",
+  "EXPORT_",
+  "USERS",
+  "USER_",
+  "CMP:",
+];
+const MINI_APP_SECTIONS = Object.freeze({
+  home: "",
+  dashboard: "",
+  invoices: "invoices",
+  payouts: "payouts",
+  activity: "activity",
+  analytics: "analytics",
+  clients: "clients",
+  risk: "risk",
+  security: "security",
+  wallet: "wallet",
+  support: "support",
+  profile: "profile",
+  ops: "ops",
+  generate: "studio",
+  studio: "studio",
+  vault: "vault",
+  history: "vault",
+});
 const PROVIDER_LANE_DETAILS = {
   "custom-details": {
     label: "Custom Details",
     status: "live",
-    summary: "Create provider-styled custom receipt or flash-mail details from the shared Transferly builder.",
+    summary: "Create provider-styled custom receipt or notification details from the shared Transferly builder.",
   },
   invoices: {
     label: "Invoices",
@@ -157,6 +300,17 @@ function truncate(value, max = 80) {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+function getTelegramLogContext(ctx, extra = {}) {
+  return {
+    updateId: ctx.update?.update_id ?? null,
+    telegramId: ctx.from?.id ?? null,
+    username: ctx.from?.username || null,
+    chatId: ctx.chat?.id || ctx.callbackQuery?.message?.chat?.id || null,
+    chatType: ctx.chat?.type || ctx.callbackQuery?.message?.chat?.type || null,
+    ...extra,
+  };
+}
+
 function formatMoney(value, currency) {
   if (value === null || typeof value === "undefined" || value === "") {
     return "—";
@@ -165,8 +319,11 @@ function formatMoney(value, currency) {
 }
 
 function statusLabel(status) {
-  if (status === "available") return "Available";
-  if (status === "comingSoon") return "Coming soon";
+  if (status === "active") return "Active";
+  if (status === "sandbox") return "Sandbox";
+  if (status === "preview") return "Preview";
+  if (status === "maintenance") return "Maintenance";
+  if (status === "disabled") return "Disabled";
   return status || "Unknown";
 }
 
@@ -434,89 +591,199 @@ function addButtonGrid(keyboard, buttons, columns = 2) {
   return keyboard;
 }
 
-function buildGuestKeyboard(ctx, access = {}) {
-  const keyboard = new InlineKeyboard()
-    .text("🪪 Whoami", buildCallbackData(ctx, "WHOAMI"))
-    .text("📚 Help", buildCallbackData(ctx, "HELP"));
-  const adminUsername = (access.configuredAdminUsername || config.admin?.username || "").replace(/^@/, "");
-  if (adminUsername) {
-    keyboard.row().url("📱 Request Access", `https://t.me/${adminUsername}`);
+function normalizeMiniAppSection(section = "home") {
+  const sectionKey = String(section || "home").replace(/^\/+/, "");
+  if (Object.prototype.hasOwnProperty.call(MINI_APP_SECTIONS, sectionKey)) {
+    return {
+      sectionKey,
+      mappedSection: MINI_APP_SECTIONS[sectionKey],
+    };
+  }
+  if (/^[a-z0-9/_-]+$/i.test(sectionKey)) {
+    return {
+      sectionKey,
+      mappedSection: sectionKey,
+    };
+  }
+  return {
+    sectionKey: "home",
+    mappedSection: MINI_APP_SECTIONS.home,
+  };
+}
+
+function normalizeMiniAppLaunchUrl(value) {
+  const url = new URL(value);
+  if (url.pathname === "/" && !url.search && !url.hash) {
+    return url.origin;
+  }
+  return url.toString();
+}
+
+function buildMiniAppUrl(section = "home") {
+  if (!config.miniAppUrl) {
+    return "";
+  }
+
+  try {
+    return normalizeMiniAppLaunchUrl(config.miniAppUrl);
+  } catch (error) {
+    logger.warn("Mini App launcher URL could not be built", {
+      section: String(section || "home").slice(0, 80),
+      message: error?.message,
+    });
+    return "";
+  }
+}
+
+function buildMiniAppButton(label = PRIMARY_MINI_APP_LABEL, section = "home", options = {}) {
+  const url = buildMiniAppUrl(section);
+  if (!url) {
+    return null;
+  }
+  if (options.forceUrl) {
+    return { text: label, url };
+  }
+  return { text: label, web_app: { url } };
+}
+
+function compactInlineKeyboardRows(keyboard) {
+  keyboard.inline_keyboard = (keyboard.inline_keyboard || []).filter((row) => Array.isArray(row) && row.length > 0);
+  return keyboard;
+}
+
+function addMiniAppButton(keyboard, label = PRIMARY_MINI_APP_LABEL, section = "home", options = {}) {
+  const button = buildMiniAppButton(label, section, options);
+  if (!button) return keyboard;
+
+  compactInlineKeyboardRows(keyboard);
+  keyboard.inline_keyboard.push([button]);
+  return keyboard;
+}
+
+function addPrimaryMiniAppButton(keyboard) {
+  return addMiniAppButton(keyboard, PRIMARY_MINI_APP_LABEL, BOT_UX_BOUNDARY.primaryMiniAppSection);
+}
+
+function addCoreBotActions(keyboard, ctx, options = {}) {
+  const includePolicies = options.includePolicies !== false;
+  keyboard
+    .row()
+    .text(BOT_NAV_LABELS.help, buildCallbackData(ctx, "HELP"))
+    .text(BOT_NAV_LABELS.support, buildCallbackData(ctx, "SUPPORT"))
+    .row()
+    .text(BOT_NAV_LABELS.status, buildCallbackData(ctx, "STATUS"));
+  if (includePolicies) {
+    keyboard
+      .text(BOT_NAV_LABELS.terms, buildCallbackData(ctx, "TERMS"))
+      .text(BOT_NAV_LABELS.privacy, buildCallbackData(ctx, "PRIVACY"));
   }
   return keyboard;
+}
+
+function addContactAdminButton(keyboard, access = {}) {
+  const adminUsername = (access.configuredAdminUsername || config.admin?.username || "").replace(/^@/, "");
+  if (adminUsername) {
+    keyboard.row().url(BOT_NAV_LABELS.contactAdmin, `https://t.me/${adminUsername}`);
+  }
+  return keyboard;
+}
+
+function buildGatewayKeyboard(ctx, access = {}, options = {}) {
+  const keyboard = new InlineKeyboard();
+  addPrimaryMiniAppButton(keyboard);
+  addCoreBotActions(keyboard, ctx, options);
+  const shouldShowContactAdmin = options.includeContactAdmin === true
+    || (options.includeContactAdmin !== false && !access.isAuthorized);
+  if (shouldShowContactAdmin) {
+    addContactAdminButton(keyboard, access);
+  }
+  return keyboard;
+}
+
+function buildGuestKeyboard(ctx, access = {}) {
+  return buildGatewayKeyboard(ctx, access, { includeContactAdmin: true });
 }
 
 function buildStartKeyboard(ctx, access = {}) {
-  const keyboard = new InlineKeyboard()
-    .text("📋 Menu", buildCallbackData(ctx, "MENU"))
-    .text("🧰 Services", buildCallbackData(ctx, "SERVICES"))
-    .row()
-    .text("🪪 Whoami", buildCallbackData(ctx, "WHOAMI"))
-    .text("📚 Help", buildCallbackData(ctx, "HELP"))
-    .row()
-    .text("✖️ Cancel Prompt", buildCallbackData(ctx, "CANCEL"));
-  const adminUsername = (access.configuredAdminUsername || config.admin?.username || "").replace(/^@/, "");
-  if (!access.isAuthorized && adminUsername) {
-    keyboard.row().url("📱 Request Access", `https://t.me/${adminUsername}`);
-  }
-  return keyboard;
+  return buildGatewayKeyboard(ctx, access);
 }
 
 function buildMainMenuKeyboard(ctx, access = {}) {
-  if (!access.isAuthorized && !access.isAdmin) {
-    return buildGuestKeyboard(ctx, access);
-  }
+  return buildGatewayKeyboard(ctx, access);
+}
 
-  const keyboard = new InlineKeyboard()
-    .text("🏦 Bank Slips", buildCallbackData(ctx, "GROUP:BANK"))
-    .text("💳 Providers", buildCallbackData(ctx, "GROUP:PAYMENT_PROVIDERS"))
-    .row()
-    .text("✉️ Flash Emails", buildCallbackData(ctx, "GROUP:FLASH"))
-    .text("₿ Crypto", buildCallbackData(ctx, "GROUP:CRYPTO"))
-    .row()
-    .text("🧰 Utilities", buildCallbackData(ctx, "GROUP:UTILITIES"))
-    .text("💰 Balance", buildCallbackData(ctx, "BALANCE"))
-    .row()
-    .text("🧾 Receipts", buildCallbackData(ctx, "RECEIPTS"))
-    .text("👤 Profile", buildCallbackData(ctx, "PROFILE"))
-    .row()
-    .text("🎁 Referral", buildCallbackData(ctx, "REFERRAL"))
-    .text("🪪 Whoami", buildCallbackData(ctx, "WHOAMI"))
-    .row()
-    .text("🏥 Health", buildCallbackData(ctx, "HEALTH"));
+function buildCommandHubKeyboard(ctx, access = {}) {
+  return buildGatewayKeyboard(ctx, access);
+}
 
-  if (access.isAdmin) {
-    keyboard
-      .row()
-      .text("📄 Invoices", buildCallbackData(ctx, "INVOICES"))
-      .text("💸 Payouts", buildCallbackData(ctx, "PAYOUTS"))
-      .row()
-      .text("⚠️ Issues", buildCallbackData(ctx, "ISSUES"))
-      .text("🧩 Ops", buildCallbackData(ctx, "OPS"))
-      .row()
-      .text("🧺 Orders", buildCallbackData(ctx, "ORDERS"))
-      .text("🔄 Reconcile", buildCallbackData(ctx, "RECONCILE"))
-      .row()
-      .text("🔍 Status", buildCallbackData(ctx, "STATUS"))
-      .text("🤖 Bot Ops", buildCallbackData(ctx, "BOT_OPS"));
-    keyboard
-      .row()
-      .text("📊 Analytics", buildCallbackData(ctx, "BOT_ANALYTICS"))
-      .text("🧾 Payment Audit", buildCallbackData(ctx, "PAYMENT_AUDIT"));
-  }
+function buildAccountCommandKeyboard(ctx) {
+  return buildGatewayKeyboard(ctx, {}, { includeContactAdmin: false });
+}
 
-  if (access.isOwner) {
-    keyboard
-      .row()
-      .text("👥 Users", buildCallbackData(ctx, "USERS"));
-  }
+function buildSupportCommandKeyboard(ctx, access = {}) {
+  return buildSupportKeyboard(ctx, access);
+}
 
+function buildSupportKeyboard(ctx, access = {}) {
+  const keyboard = new InlineKeyboard();
+  addPrimaryMiniAppButton(keyboard);
+  keyboard
+    .row()
+    .text(BOT_NAV_LABELS.supportAccount, buildCallbackData(ctx, "SUPPORT_ACCOUNT"))
+    .text(BOT_NAV_LABELS.supportPayment, buildCallbackData(ctx, "SUPPORT_PAYMENT"))
+    .row()
+    .text(BOT_NAV_LABELS.supportTechnical, buildCallbackData(ctx, "SUPPORT_TECHNICAL"))
+    .text(BOT_NAV_LABELS.supportContact, buildCallbackData(ctx, "SUPPORT_CONTACT"))
+    .row()
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
+  if (!access.isAuthorized) addContactAdminButton(keyboard, access);
   return keyboard;
+}
+
+function buildCommandSectionKeyboard(ctx, section, access = {}) {
+  switch (section) {
+    case "MENU_COLLECT":
+    case "MENU_SEND":
+      return buildCommandHubKeyboard(ctx, access);
+    case "MENU_ACCOUNT":
+      return buildAccountCommandKeyboard(ctx);
+    case "MENU_ADMIN":
+      return buildCommandHubKeyboard(ctx, access);
+    case "MENU_SUPPORT":
+    default:
+      return buildSupportCommandKeyboard(ctx, access);
+  }
+}
+
+function buildMiniAppHandoffKeyboard(ctx, access = {}) {
+  return buildGatewayKeyboard(ctx, access, { includePolicies: false });
+}
+
+function isMiniAppDelegatedAction(action) {
+  const value = String(action || "");
+  return MINI_APP_DELEGATED_ACTIONS.has(value) || MINI_APP_DELEGATED_PREFIXES.some((prefix) => value.startsWith(prefix));
+}
+
+function buildProvidersKeyboard(ctx, access = {}) {
+  return buildMiniAppHandoffKeyboard(ctx, access);
+}
+
+function buildInvoiceCenterKeyboard(ctx, access = {}) {
+  return buildMiniAppHandoffKeyboard(ctx, access);
+}
+
+function buildPayoutCenterKeyboard(ctx, access = {}) {
+  return buildMiniAppHandoffKeyboard(ctx, access);
+}
+
+function buildOpsCommandCenterKeyboard(ctx) {
+  return buildMiniAppHandoffKeyboard(ctx, { isAdmin: true });
 }
 
 function buildBackKeyboard(ctx) {
   return new InlineKeyboard()
     .text("⬅️ Back", buildCallbackData(ctx, "BACK"))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
 }
 
 function buildScreenKeyboard(ctx, type, options = {}) {
@@ -536,70 +803,19 @@ function buildScreenKeyboard(ctx, type, options = {}) {
 }
 
 function buildServiceGroupsKeyboard(ctx) {
-  const keyboard = new InlineKeyboard();
-  addButtonGrid(
-    keyboard,
-    SERVICE_GROUPS.map((group) => ({
-      label: group.title,
-      action: buildCallbackData(ctx, `GROUP:${group.id}`),
-    })),
-  );
-  keyboard
-    .row()
-    .text("🔎 Search Service", buildCallbackData(ctx, "SEARCH:SERVICE"))
-    .row()
-    .text("⬅️ Back", buildCallbackData(ctx, "BACK"));
-  return keyboard;
+  return buildMiniAppHandoffKeyboard(ctx);
 }
 
 function buildServiceGroupKeyboard(ctx, group) {
-  const keyboard = new InlineKeyboard();
-  const buttons = group.slugs
-    .map((slug) => getService(slug))
-    .filter(Boolean)
-    .map((service) => ({
-      label: service.status === "comingSoon" ? `${service.title} · Soon` : service.title,
-      action: buildCallbackData(ctx, `SERVICE:${service.slug}`),
-    }));
-  addButtonGrid(keyboard, buttons);
-  keyboard
-    .row()
-    .text("⬅️ Services", buildCallbackData(ctx, "SERVICES"))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
-  return keyboard;
+  return buildMiniAppHandoffKeyboard(ctx);
 }
 
 function buildServiceDetailKeyboard(ctx, service) {
-  const groupId = getServiceGroupId(service);
-  const keyboard = new InlineKeyboard();
+  return buildMiniAppHandoffKeyboard(ctx);
+}
 
-  if (isPaymentProviderService(service)) {
-    keyboard
-      .text("🧭 Provider Workspace", buildCallbackData(ctx, `PROVIDER:${service.slug}`))
-      .text("✍️ Custom Details", buildCallbackData(ctx, `PROVIDER_CUSTOM:${service.slug}`))
-      .row()
-      .text("🕒 Recent Receipts", buildCallbackData(ctx, `HISTORY:${service.slug}`))
-      .text("💰 Balance", buildCallbackData(ctx, "BALANCE"));
-  } else
-  if (canGenerateService(service)) {
-    const customLabel = service.slug === "paypal" ? "🧭 PayPal Workspace" : "✍️ Custom Details";
-    keyboard
-      .text("⚡ Quick Generate", buildCallbackData(ctx, `RUN:${service.slug}`))
-      .text(customLabel, buildCallbackData(ctx, `CUSTOM:${service.slug}`))
-      .row()
-      .text("🕒 Recent Receipts", buildCallbackData(ctx, `HISTORY:${service.slug}`))
-      .text("💰 Balance", buildCallbackData(ctx, "BALANCE"));
-  } else {
-    keyboard
-      .text("ℹ️ Service Info", buildCallbackData(ctx, `INFO:${service.slug}`))
-      .text("💰 Balance", buildCallbackData(ctx, "BALANCE"));
-  }
-
-  keyboard
-    .row()
-    .text("⬅️ Back", buildCallbackData(ctx, `GROUP:${groupId}`))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
-  return keyboard;
+function buildServiceLaneKeyboard(ctx, service, lane) {
+  return buildMiniAppHandoffKeyboard(ctx);
 }
 
 function isPaymentProviderService(service) {
@@ -607,9 +823,152 @@ function isPaymentProviderService(service) {
 }
 
 function getProviderLaneStatus(providerSlug, laneId) {
+  const manifestStatus = getManifestProviderLaneStatus(providerSlug, laneId);
+  if (manifestStatus !== "setup") return manifestStatus;
   const lane = PROVIDER_LANE_DETAILS[laneId];
   if (!lane) return "setup";
   return lane.statusByProvider?.[providerSlug] || lane.status || "setup";
+}
+
+function providerLaneStatusIcon(status) {
+  if (status === "live") return "✅";
+  if (status === "preview") return "🧪";
+  if (status === "coming-soon") return "⏳";
+  return "🛠";
+}
+
+function providerLaneStatusLabel(status) {
+  if (status === "live") return "Live";
+  if (status === "preview") return "Preview";
+  if (status === "coming-soon") return "Coming soon";
+  return "Setup required";
+}
+
+function providerLaneButtonLabel(workspace, lane, options = {}) {
+  const label = options.commandLabel ? lane.commandLabel || lane.label : lane.shortLabel || lane.label;
+  const prefix = options.includeProvider ? `${workspace.displayName} ` : "";
+  return `${providerLaneStatusIcon(lane.status)} ${prefix}${label}`;
+}
+
+function providerLaneAction(ctx, workspace, lane) {
+  return buildCallbackData(ctx, lane.botAction || `PROVIDER_LANE:${workspace.slug}:${lane.id}`);
+}
+
+function addProviderWorkspaceMiniAppButton(keyboard) {
+  return addPrimaryMiniAppButton(keyboard);
+}
+
+function copyInlineKeyboardRows(targetKeyboard, sourceKeyboard) {
+  (sourceKeyboard.inline_keyboard || []).forEach((row, rowIndex) => {
+    if (rowIndex > 0) targetKeyboard.row();
+    row.forEach((button) => {
+      if (button.callback_data) {
+        targetKeyboard.text(button.text, button.callback_data);
+      } else if (button.url) {
+        targetKeyboard.url(button.text, button.url);
+      }
+    });
+  });
+  return targetKeyboard;
+}
+
+function buildServiceCommandCenterSummaryUrl(slug) {
+  if (!slug || !config.apiUrl || !config.admin?.apiToken) return "";
+  try {
+    return new URL(`/api/services/${encodeURIComponent(slug)}/command-center`, config.apiUrl).toString();
+  } catch (_) {
+    return "";
+  }
+}
+
+function buildServiceLaneDetailUrl(slug, laneId) {
+  if (!slug || !laneId || !config.apiUrl || !config.admin?.apiToken) return "";
+  try {
+    return new URL(`/api/services/${encodeURIComponent(slug)}/lanes/${encodeURIComponent(laneId)}`, config.apiUrl).toString();
+  } catch (_) {
+    return "";
+  }
+}
+
+function buildServiceLaneActionUrl(slug, laneId) {
+  if (!slug || !laneId || !config.apiUrl || !config.admin?.apiToken) return "";
+  try {
+    return new URL(`/api/services/${encodeURIComponent(slug)}/lanes/${encodeURIComponent(laneId)}/actions`, config.apiUrl).toString();
+  } catch (_) {
+    return "";
+  }
+}
+
+async function loadServiceCommandCenterSummary(ctx, service) {
+  const url = buildServiceCommandCenterSummaryUrl(service?.slug);
+  if (!url) return null;
+  try {
+    const response = await httpClient.get(ctx, url, {
+      timeout: 5000,
+      retry: { retries: 0 },
+    });
+    return response.data || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function loadServiceLaneDetail(ctx, service, laneId) {
+  const url = buildServiceLaneDetailUrl(service?.slug, laneId);
+  if (!url) return null;
+  try {
+    const response = await httpClient.get(ctx, url, {
+      timeout: 5000,
+      retry: { retries: 0 },
+    });
+    return response.data || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function recordServiceLaneActionIntent(ctx, service, lane) {
+  const url = buildServiceLaneActionUrl(service?.slug, lane?.id);
+  if (!url) return null;
+
+  const response = await httpClient.post(
+    ctx,
+    url,
+    {
+      source: "telegram-bot",
+      intent: lane?.action || "launch",
+      metadata: {
+        mini_app_section: lane?.miniAppSection || "",
+      },
+    },
+    {
+      timeout: 5000,
+      retry: { retries: 0 },
+    },
+  );
+  return response.data || null;
+}
+
+function formatServiceLaneMetricLines(metrics = []) {
+  return metrics
+    .slice(0, 3)
+    .map((metric) => line(metric.label || "Metric", metric.value || "Pending"));
+}
+
+function formatServiceLaneReadinessLines(checks = []) {
+  return checks
+    .slice(0, 4)
+    .map((check) => line(check.label || "Check", check.status === "ready" ? "Ready" : "Attention"));
+}
+
+function formatServiceLaneActivityLines(activity = {}) {
+  const receipts = Array.isArray(activity.recent_receipts) ? activity.recent_receipts : [];
+  const latest = receipts[0];
+  return [
+    line("Service receipts", activity.service_receipt_count || 0),
+    line("Compatible history", activity.compatible_receipt_count || 0),
+    line("Latest", latest?.title || "No matching receipt"),
+  ];
 }
 
 function providerTitleFromKey(providerKey) {
@@ -617,49 +976,157 @@ function providerTitleFromKey(providerKey) {
   return getService(providerKey)?.title || providerKey;
 }
 
-function buildProviderWorkspaceKeyboard(ctx, service, access = {}) {
-  if (service.slug === "paypal") {
-    return buildPayPalWorkspaceKeyboard(ctx, access);
+function normalizeProviderSlug(value) {
+  const slug = String(value || "")
+    .trim()
+    .replace(/^@/, "")
+    .replace(/^\//, "")
+    .toLowerCase();
+  return PAYMENT_PROVIDER_SLUGS.has(slug) ? slug : "";
+}
+
+function recordProviderKey(record, fallback = "paypal") {
+  return String(
+    record?.provider ||
+    record?.payment_provider ||
+    record?.metadata?.provider ||
+    record?.summary?.provider ||
+    fallback,
+  ).toLowerCase();
+}
+
+function providerListAction(type, record) {
+  const provider = recordProviderKey(record);
+  if (!provider || provider === "paypal") return type === "invoice" ? "PP:INV" : "PP:PO";
+  return `${type === "invoice" ? "PROVIDER_INV" : "PROVIDER_PO"}:${provider}`;
+}
+
+function providerHomeAction(record) {
+  const provider = recordProviderKey(record);
+  return !provider || provider === "paypal" ? "PP:HOME" : `PROVIDER:${provider}`;
+}
+
+function providerHomeLabel(record) {
+  const provider = recordProviderKey(record);
+  return `🏠 ${providerTitleFromKey(provider)}`;
+}
+
+function formatProviderFeatureSummary(features = {}) {
+  if (!features || typeof features !== "object") return "—";
+  const enabled = Object.entries(features)
+    .filter(([, value]) => value === true)
+    .map(([key]) => key.replace(/_/g, " "))
+    .slice(0, 5);
+  return enabled.length ? enabled.join(", ") : features.supported === false ? "not supported" : "configured";
+}
+
+function providerLanesWithIntent(service, intent) {
+  return getProviderLanes(service.slug).filter((lane) => lane.intent === intent);
+}
+
+function hasLiveProviderIntent(service, intent) {
+  return providerLanesWithIntent(service, intent).some((lane) => getProviderLaneStatus(service.slug, lane.id) === "live");
+}
+
+function findProviderLaneByIntent(service, intent) {
+  return providerLanesWithIntent(service, intent)[0] || null;
+}
+
+function providerGuidedAction(service, lane) {
+  if (!service || !lane) return null;
+  if (lane.botAction) return lane.botAction;
+  if (lane.intent === "collect") return `PROVIDER_INV:${service.slug}`;
+  if (lane.intent === "send") return `PROVIDER_PO:${service.slug}`;
+  if (lane.intent === "balance") return `PROVIDER_BAL:${service.slug}`;
+  if (lane.intent === "activity") return `PROVIDER_WEBHOOKS:${service.slug}`;
+  return null;
+}
+
+function buildProviderOpsKeyboard(ctx, service, options = {}) {
+  const keyboard = new InlineKeyboard();
+  const hasInvoices = hasLiveProviderIntent(service, "collect") || getProviderLaneStatus(service.slug, "invoices") === "live";
+  const hasPayouts = hasLiveProviderIntent(service, "send") || getProviderLaneStatus(service.slug, "payouts") === "live";
+  const hasBalance = hasLiveProviderIntent(service, "balance") || getProviderLaneStatus(service.slug, "wallet-balance") === "live";
+  const hasActivity = hasLiveProviderIntent(service, "activity") || getProviderLaneStatus(service.slug, "provider-activity") === "live";
+
+  if (hasInvoices) {
+    keyboard.text("📄 Open Invoices", buildCallbackData(ctx, `PROVIDER_INV:${service.slug}`));
   }
-
-  const keyboard = new InlineKeyboard()
-    .text("✍️ Custom Details", buildCallbackData(ctx, `PROVIDER_CUSTOM:${service.slug}`))
-    .row();
-
-  ["invoices", "payouts", "wallet-balance", "provider-activity"].forEach((laneId, index) => {
-    const lane = PROVIDER_LANE_DETAILS[laneId];
-    const status = getProviderLaneStatus(service.slug, laneId);
-    const label = `${status === "live" ? "✅" : "🛠"} ${lane.label}`;
-    keyboard.text(label, buildCallbackData(ctx, `PROVIDER_LANE:${service.slug}:${laneId}`));
-    if (index % 2 === 1 && index < 3) {
-      keyboard.row();
-    }
-  });
-
-  keyboard
-    .row()
-    .text(`⬅️ ${service.title}`, buildCallbackData(ctx, `SERVICE:${service.slug}`))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+  if (hasPayouts) {
+    keyboard.text("💸 Open Payouts", buildCallbackData(ctx, `PROVIDER_PO:${service.slug}`));
+  }
+  if (hasInvoices || hasPayouts) keyboard.row();
+  if (hasBalance) {
+    keyboard.text("💰 Provider Balance", buildCallbackData(ctx, `PROVIDER_BAL:${service.slug}`));
+  }
+  if (hasActivity) {
+    keyboard.text("🛰 Webhooks", buildCallbackData(ctx, `PROVIDER_WEBHOOKS:${service.slug}`));
+  }
+  if (hasBalance || hasActivity) keyboard.row();
+  keyboard.text("⚠️ Issues", buildCallbackData(ctx, `PROVIDER_ISSUES:${service.slug}`));
+  if (options.includeReconcile) {
+    keyboard.text("🔁 Reconcile", buildCallbackData(ctx, "RECONCILE"));
+  }
   return keyboard;
 }
 
-function buildServiceSearchResultsKeyboard(ctx, services) {
+function buildProviderDetailKeyboard(ctx, service, refreshAction) {
   const keyboard = new InlineKeyboard();
-  addButtonGrid(
-    keyboard,
-    services.map((service) => ({
-      label: service.title,
-      action: buildCallbackData(ctx, `SERVICE:${service.slug}`),
-    })),
-    1,
-  );
+  if (refreshAction) {
+    keyboard.text("🔄 Refresh", buildCallbackData(ctx, refreshAction)).row();
+  }
+  keyboard
+    .text(`⬅️ ${service.title}`, buildCallbackData(ctx, `PROVIDER:${service.slug}`))
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
+  return keyboard;
+}
+
+function buildProviderLaneKeyboard(ctx, service, workspace, lane) {
+  const keyboard = new InlineKeyboard();
+  const action = lane.status === "live" ? providerGuidedAction(service, lane) : null;
+  if (action) {
+    keyboard.text(`🚀 Open ${lane.label}`, buildCallbackData(ctx, action)).row();
+  }
+  if (workspace?.docsUrl) {
+    keyboard.url("📚 Official Docs", workspace.docsUrl);
+  }
+  if (workspace?.supportUrl) {
+    keyboard.url("🛟 Help", workspace.supportUrl);
+  }
+  addProviderWorkspaceMiniAppButton(keyboard, service.slug, lane.id, `🚀 Open ${lane.label} Mini App`);
   keyboard
     .row()
-    .text("🔎 Search Again", buildCallbackData(ctx, "SEARCH:SERVICE"))
-    .row()
-    .text("⬅️ Services", buildCallbackData(ctx, "SERVICES"))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(`⬅️ ${service.title}`, buildCallbackData(ctx, `PROVIDER:${service.slug}`))
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
   return keyboard;
+}
+
+function providerLaneNextStep(service, lane, status) {
+  const action = providerGuidedAction(service, lane);
+  if (status === "live" && action) {
+    return `Use Open ${lane.label} for the guided bot flow, or continue in the Mini App workspace.`;
+  }
+  if (status === "live") {
+    return "Open the Mini App workspace for the full lane view, or refresh the provider workspace when available.";
+  }
+  if (status === "preview") {
+    return "Review this lane in the Mini App while the remaining backend controls are completed.";
+  }
+  if (status === "setup") {
+    return `Connect ${service.title} credentials, signed webhooks, idempotency, state mapping, and ledger rules before enabling this lane.`;
+  }
+  if (status === "planned") {
+    return "Keep this lane visible for product planning, then enable it after backend support and tests are ready.";
+  }
+  return "Return to the provider workspace or open the official docs for setup guidance.";
+}
+
+function buildProviderWorkspaceKeyboard(ctx, service, access = {}) {
+  return buildMiniAppHandoffKeyboard(ctx, access);
+}
+
+function buildServiceSearchResultsKeyboard(ctx, services) {
+  return buildMiniAppHandoffKeyboard(ctx);
 }
 
 function buildUsersKeyboard(ctx) {
@@ -683,7 +1150,7 @@ function buildUsersKeyboard(ctx) {
     .text("📊 Analytics", buildCallbackData(ctx, "BOT_ANALYTICS"))
     .row()
     .text("⬅️ Back", buildCallbackData(ctx, "BACK"))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
 }
 
 function buildUsersListKeyboard(ctx, users = []) {
@@ -704,7 +1171,7 @@ function buildUsersListKeyboard(ctx, users = []) {
     .text("⬇️ Export Users", buildCallbackData(ctx, "EXPORT_USERS"))
     .row()
     .text("⬅️ Users", buildCallbackData(ctx, "USERS"))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
   return keyboard;
 }
 
@@ -729,7 +1196,7 @@ function buildUserDetailKeyboard(ctx, user = {}) {
   keyboard
     .row()
     .text("⬅️ Users", buildCallbackData(ctx, "USERS_LIST"))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
   return keyboard;
 }
 
@@ -738,7 +1205,7 @@ function buildUsersAuditKeyboard(ctx) {
     .text("🔄 Refresh", buildCallbackData(ctx, "USERS_AUDIT"))
     .row()
     .text("⬅️ Users", buildCallbackData(ctx, "USERS"))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
 }
 
 function buildPaymentAuditKeyboard(ctx) {
@@ -752,7 +1219,7 @@ function buildPaymentAuditKeyboard(ctx) {
     .text("⬇️ Export CSV", buildCallbackData(ctx, "EXPORT_PAYMENT_AUDIT"))
     .row()
     .text("📊 Analytics", buildCallbackData(ctx, "BOT_ANALYTICS"))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
 }
 
 function buildBotAnalyticsKeyboard(ctx) {
@@ -764,7 +1231,7 @@ function buildBotAnalyticsKeyboard(ctx) {
     .text("🧾 Payment Audit", buildCallbackData(ctx, "PAYMENT_AUDIT"))
     .text("👥 Users", buildCallbackData(ctx, "USERS"))
     .row()
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
 }
 
 function buildSubscriptionAlertsKeyboard(ctx) {
@@ -782,7 +1249,7 @@ function buildSubscriptionAlertsKeyboard(ctx) {
     .text("⏳ Expiring", buildCallbackData(ctx, "USERS_EXPIRING"))
     .text("👥 Users", buildCallbackData(ctx, "USERS"))
     .row()
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
 }
 
 function buildSubscriptionDurationKeyboard(ctx) {
@@ -817,7 +1284,7 @@ function buildCancelKeyboard(ctx) {
     .text("Cancel", buildCallbackData(ctx, "CANCEL"))
     .text("Back", buildCallbackData(ctx, "BACK"))
     .row()
-    .text("Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
 }
 
 function buildComposerPreviewKeyboard(ctx) {
@@ -826,36 +1293,21 @@ function buildComposerPreviewKeyboard(ctx) {
     .text("✏️ Edit", buildCallbackData(ctx, "CMP:EDIT"))
     .row()
     .text("Cancel", buildCallbackData(ctx, "CMP:CANCEL"))
-    .text("Main Menu", buildCallbackData(ctx, "MENU"));
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
 }
 
 function buildPayPalWorkspaceKeyboard(ctx, access = {}) {
-  const keyboard = new InlineKeyboard()
-    .text("✉️ Flash Email", buildCallbackData(ctx, "PP:EMAIL"))
-    .row()
-    .text("🕒 PayPal Receipts", buildCallbackData(ctx, "HISTORY:paypal"))
-    .text("💰 Balance", buildCallbackData(ctx, "BALANCE"));
-
-  if (access.isAdmin) {
-    keyboard
-      .row()
-      .text("📄 Official Invoices", buildCallbackData(ctx, "PP:INV"))
-      .text("💸 Official Payouts", buildCallbackData(ctx, "PP:PO"))
-      .row()
-      .text("🔎 Search Invoice", buildCallbackData(ctx, "PP:INV_SEARCH"))
-      .text("🔎 Search Payout", buildCallbackData(ctx, "PP:PO_SEARCH"));
-  }
-
-  keyboard
-    .row()
-    .text("⬅️ PayPal Service", buildCallbackData(ctx, "SERVICE:paypal"))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
-  return keyboard;
+  return buildMiniAppHandoffKeyboard(ctx, access);
 }
 
 function buildPayPalListKeyboard(ctx, type, items, pagination = {}, view = {}) {
   const keyboard = new InlineKeyboard();
   const prefix = type === "invoice" ? "PP:INV_D" : "PP:PO_D";
+  const refreshAction = view.provider
+    ? `${type === "invoice" ? "PROVIDER_INV" : "PROVIDER_PO"}:${view.provider}`
+    : (type === "invoice" ? "PP:INV" : "PP:PO");
+  const parentAction = view.provider ? `PROVIDER:${view.provider}` : "PP:HOME";
+  const parentLabel = view.provider ? `⬅️ ${providerTitleFromKey(view.provider)}` : "⬅️ PayPal";
   addButtonGrid(
     keyboard,
     items.map((item) => ({
@@ -887,15 +1339,15 @@ function buildPayPalListKeyboard(ctx, type, items, pagination = {}, view = {}) {
   if (Number(pagination.page || view.page || 1) > 1) {
     keyboard.text("⬅️ Prev", buildCallbackData(ctx, `${pageAction}:${Number(pagination.page || view.page) - 1}`));
   }
-  keyboard.text(`Page ${pagination.page || view.page || 1}`, buildCallbackData(ctx, type === "invoice" ? "PP:INV" : "PP:PO"));
+  keyboard.text(`Page ${pagination.page || view.page || 1}`, buildCallbackData(ctx, refreshAction));
   if (pagination.has_next_page) {
     keyboard.text("Next ➡️", buildCallbackData(ctx, `${pageAction}:${Number(pagination.page || view.page || 1) + 1}`));
   }
 
   keyboard
     .row()
-    .text("🔄 Refresh List", buildCallbackData(ctx, type === "invoice" ? "PP:INV" : "PP:PO"))
-    .text("⬅️ PayPal", buildCallbackData(ctx, "PP:HOME"));
+    .text("🔄 Refresh List", buildCallbackData(ctx, refreshAction))
+    .text(parentLabel, buildCallbackData(ctx, parentAction));
   return keyboard;
 }
 
@@ -920,26 +1372,26 @@ function buildInvoiceDetailKeyboard(ctx, invoice, key) {
 
   keyboard
     .row()
-    .text("⬅️ Invoices", buildCallbackData(ctx, "PP:INV"))
-    .text("🏠 PayPal", buildCallbackData(ctx, "PP:HOME"));
+    .text("⬅️ Invoices", buildCallbackData(ctx, providerListAction("invoice", invoice)))
+    .text(providerHomeLabel(invoice), buildCallbackData(ctx, providerHomeAction(invoice)));
   return keyboard;
 }
 
-function buildInvoiceConfirmKeyboard(ctx, key) {
+function buildInvoiceConfirmKeyboard(ctx, key, invoice = null) {
   return new InlineKeyboard()
     .text("✅ Confirm Release", buildCallbackData(ctx, `PP:INV_DO_RELEASE:${key}`))
     .row()
     .text("⬅️ Invoice", buildCallbackData(ctx, `PP:INV_D:${key}`))
-    .text("🏠 PayPal", buildCallbackData(ctx, "PP:HOME"));
+    .text(providerHomeLabel(invoice), buildCallbackData(ctx, providerHomeAction(invoice)));
 }
 
-function buildInvoiceResultKeyboard(ctx, key) {
+function buildInvoiceResultKeyboard(ctx, key, invoice = null) {
   return new InlineKeyboard()
     .text("👁 View Invoice", buildCallbackData(ctx, `PP:INV_D:${key}`))
     .text("🔄 Refresh", buildCallbackData(ctx, `PP:INV_REFRESH:${key}`))
     .row()
-    .text("⬅️ Invoices", buildCallbackData(ctx, "PP:INV"))
-    .text("🏠 PayPal", buildCallbackData(ctx, "PP:HOME"));
+    .text("⬅️ Invoices", buildCallbackData(ctx, providerListAction("invoice", invoice)))
+    .text(providerHomeLabel(invoice), buildCallbackData(ctx, providerHomeAction(invoice)));
 }
 
 function buildPayoutDetailKeyboard(ctx, payout, key) {
@@ -956,58 +1408,32 @@ function buildPayoutDetailKeyboard(ctx, payout, key) {
 
   keyboard
     .row()
-    .text("⬅️ Payouts", buildCallbackData(ctx, "PP:PO"))
-    .text("🏠 PayPal", buildCallbackData(ctx, "PP:HOME"));
+    .text("⬅️ Payouts", buildCallbackData(ctx, providerListAction("payout", payout)))
+    .text(providerHomeLabel(payout), buildCallbackData(ctx, providerHomeAction(payout)));
   return keyboard;
 }
 
-function buildPayoutConfirmKeyboard(ctx, action, key) {
+function buildPayoutConfirmKeyboard(ctx, action, key, payout = null) {
   const confirmAction = action === "cancel" ? "PP:PO_DO_CANCEL" : "PP:PO_DO_APPROVE";
   const label = action === "cancel" ? "↩️ Confirm Cancel" : "✅ Confirm Approve";
   return new InlineKeyboard()
     .text(label, buildCallbackData(ctx, `${confirmAction}:${key}`))
     .row()
     .text("⬅️ Payout", buildCallbackData(ctx, `PP:PO_D:${key}`))
-    .text("🏠 PayPal", buildCallbackData(ctx, "PP:HOME"));
+    .text(providerHomeLabel(payout), buildCallbackData(ctx, providerHomeAction(payout)));
 }
 
-function buildPayoutResultKeyboard(ctx, key) {
+function buildPayoutResultKeyboard(ctx, key, payout = null) {
   return new InlineKeyboard()
     .text("👁 View Payout", buildCallbackData(ctx, `PP:PO_D:${key}`))
     .text("🔄 Refresh", buildCallbackData(ctx, `PP:PO_REFRESH:${key}`))
     .row()
-    .text("⬅️ Payouts", buildCallbackData(ctx, "PP:PO"))
-    .text("🏠 PayPal", buildCallbackData(ctx, "PP:HOME"));
+    .text("⬅️ Payouts", buildCallbackData(ctx, providerListAction("payout", payout)))
+    .text(providerHomeLabel(payout), buildCallbackData(ctx, providerHomeAction(payout)));
 }
 
 function buildCallbackRecoveryKeyboard(ctx, action, access = {}) {
-  const value = String(action || "");
-  if (value.startsWith("USER_") || value.startsWith("USERS")) {
-    return access.isOwner ? buildUsersKeyboard(ctx) : buildMainMenuKeyboard(ctx, access);
-  }
-  if (
-    value.startsWith("PP:") ||
-    value === "INVOICES" ||
-    value === "PAYOUTS"
-  ) {
-    return buildPayPalWorkspaceKeyboard(ctx, access);
-  }
-  if (
-    value.startsWith("GROUP:") ||
-    value.startsWith("SERVICE:") ||
-    value.startsWith("PROVIDER:") ||
-    value.startsWith("PROVIDER_CUSTOM:") ||
-    value.startsWith("PROVIDER_LANE:") ||
-    value.startsWith("PROVIDER_INV:") ||
-    value.startsWith("RUN:") ||
-    value.startsWith("CUSTOM:") ||
-    value.startsWith("HISTORY:") ||
-    value.startsWith("INFO:") ||
-    value === "SERVICES"
-  ) {
-    return buildServiceGroupsKeyboard(ctx);
-  }
-  return buildMainMenuKeyboard(ctx, access);
+  return buildCommandHubKeyboard(ctx, access);
 }
 
 function getTrackedMenuMessages(ctx) {
@@ -1043,14 +1469,26 @@ async function deleteOrDisableMessage(ctx, chatId, messageId) {
   try {
     await ctx.api.deleteMessage(chatId, messageId);
     return;
-  } catch (_deleteError) {
+  } catch (deleteError) {
     // Telegram may refuse deletion for old messages; removing buttons still prevents stale actions.
+    logger.debug("Bot message delete skipped", {
+      chatId,
+      messageId,
+      code: deleteError?.error_code || deleteError?.code,
+      message: deleteError?.description || deleteError?.message,
+    });
   }
 
   try {
     await ctx.api.editMessageReplyMarkup(chatId, messageId);
-  } catch (_editError) {
+  } catch (editError) {
     // Ignore cleanup failures so the operator flow keeps moving.
+    logger.debug("Bot message markup cleanup skipped", {
+      chatId,
+      messageId,
+      code: editError?.error_code || editError?.code,
+      message: editError?.description || editError?.message,
+    });
   }
 }
 
@@ -1092,12 +1530,30 @@ async function clearTriggerMessage(ctx) {
 }
 
 async function replyHtml(ctx, text, keyboard = null) {
-  await clearMenuMessages(ctx);
-  const message = await ctx.reply(text, {
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
-    ...(keyboard ? { reply_markup: keyboard } : {}),
+  await clearMenuMessages(ctx).catch((error) => {
+    logger.debug("Bot menu cleanup skipped before reply", {
+      ...getTelegramLogContext(ctx),
+      message: error?.message,
+    });
   });
+  let message;
+  try {
+    message = await ctx.reply(text, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...(keyboard ? { reply_markup: keyboard } : {}),
+    });
+  } catch (error) {
+    logger.warn("Bot HTML reply failed; retrying plain text", {
+      ...getTelegramLogContext(ctx),
+      code: error?.error_code || error?.code,
+      message: error?.description || error?.message,
+    });
+    message = await ctx.reply(String(text || "").replace(/<[^>]+>/g, ""), {
+      disable_web_page_preview: true,
+      ...(keyboard ? { reply_markup: keyboard } : {}),
+    });
+  }
   registerMenuMessage(ctx, message);
   return message;
 }
@@ -1393,6 +1849,20 @@ async function sendComposerPreview(ctx) {
 }
 
 async function startServiceComposer(ctx, service, baseDetails = {}) {
+  if (!canGenerateService(service)) {
+    delete ctx.session.meta.serviceComposer;
+    await replyHtml(
+      ctx,
+      [
+        `<b>${escapeHtml(service?.title || "Service")}</b>`,
+        "",
+        escapeHtml(serviceSummary(service)),
+      ].join("\n"),
+      service ? buildServiceDetailKeyboard(ctx, service) : buildBackKeyboard(ctx),
+    );
+    return false;
+  }
+
   ctx.session.meta.serviceComposer = {
     slug: service.slug,
     baseDetails,
@@ -1402,6 +1872,7 @@ async function startServiceComposer(ctx, service, baseDetails = {}) {
     createdAt: Date.now(),
   };
   await sendComposerPrompt(ctx);
+  return true;
 }
 
 function ensurePayPalCache(ctx) {
@@ -1474,7 +1945,7 @@ function formatFilterLabel(view, type) {
   const filters = [];
   if (view.provider) filters.push(`provider=${view.provider}`);
   if (view.status) filters.push(`status=${view.status}`);
-  if (type === "payout" && view.providerState) filters.push(`provider=${view.providerState}`);
+  if (type === "payout" && view.providerState) filters.push(`providerState=${view.providerState}`);
   if (view.recipient) filters.push(`search=${view.recipient}`);
   return filters.length ? filters.join(", ") : "none";
 }
@@ -1535,16 +2006,22 @@ async function runServiceReceipt(ctx, service, details = {}) {
 async function handlePayPalWorkspace(ctx) {
   if (!(await requireCapability(ctx, CAPABILITIES.SERVICES_USE, "PayPal service workspace"))) return;
   const access = await getAccessStatus(ctx);
+  const workspace = getProviderWorkspace("paypal");
+  const lanes = (workspace?.lanes || [])
+    .filter((lane) => lane.id !== "overview")
+    .map((lane) => line(`${providerLaneStatusIcon(lane.status)} ${lane.label}`, `${providerLaneStatusLabel(lane.status)} · ${lane.summary}`));
   rememberScreen(ctx, "PP:HOME");
+  rememberProviderContext(ctx, { provider: "paypal", action: "PP:HOME" });
   clearPendingPrompts(ctx);
   const lines = [
     "<b>PayPal Workspace</b>",
     "",
-    "Choose the PayPal lane you want to operate.",
+    escapeHtml(workspace?.shortDescription || "Choose the PayPal lane you want to operate."),
     "",
-    line("Flash Email", "Generate PayPal receipt-style email output"),
-    access.isAdmin ? line("Official Invoices", "Filter, page, inspect, refresh, open links, and release paid funds") : null,
-    access.isAdmin ? line("Official Payouts", "Filter, page, inspect, approve, reject, refresh, or cancel unclaimed payouts") : null,
+    "<b>Provider Lanes</b>",
+    ...lanes,
+    access.isAdmin ? "" : null,
+    access.isAdmin ? "Admin lanes include official invoice, payout, activity, and developer operations." : null,
   ].filter(Boolean);
   await replyHtml(ctx, lines.join("\n"), buildPayPalWorkspaceKeyboard(ctx, access));
 }
@@ -1555,6 +2032,7 @@ async function handleProviderWorkspace(ctx, slug) {
     await handleServiceDetail(ctx, slug);
     return;
   }
+  rememberProviderContext(ctx, { provider: service.slug, action: `PROVIDER:${service.slug}` });
 
   if (service.slug === "paypal") {
     await handlePayPalWorkspace(ctx);
@@ -1565,94 +2043,301 @@ async function handleProviderWorkspace(ctx, slug) {
   const access = await getAccessStatus(ctx);
   rememberScreen(ctx, `PROVIDER:${service.slug}`);
   clearPendingPrompts(ctx);
+  const [readinessPayload, capabilityPayload, healthPayload, providerStatusPayload, adminStatusPayload, featuresPayload] = access.isAdmin
+    ? await Promise.all([
+      getProviderReadinessPayload(service.slug),
+      getProviderCapabilityPayload(service.slug),
+      getProviderHealthPayload(service.slug),
+      getProviderStatusPayload(service.slug),
+      adminGet(`/api/admin/payment-providers/${service.slug}`).catch(() => null),
+      adminGet(`/api/admin/payment-providers/${service.slug}/invoice-features`).catch(() => null),
+    ])
+    : await Promise.all([
+      getProviderReadinessPayload(service.slug),
+      getProviderCapabilityPayload(service.slug),
+      getProviderHealthPayload(service.slug),
+      getProviderStatusPayload(service.slug),
+      Promise.resolve(null),
+      Promise.resolve(null),
+    ]);
+  const readiness = readinessPayload?.data || null;
+  const capability = capabilityPayload?.data || null;
+  const health = healthPayload?.data || null;
+  const providerStatus = providerStatusPayload?.data || null;
+  const adminProviderStatus = adminStatusPayload?.provider || {};
+  const providerFeatures = featuresPayload?.provider || {};
+  const workspace = getProviderWorkspace(service.slug);
+  const laneLines = (workspace?.lanes || [])
+    .filter((lane) => lane.id !== "overview")
+    .map((lane) => line(`${providerLaneStatusIcon(lane.status)} ${lane.label}`, `${providerLaneStatusLabel(lane.status)} · ${lane.summary}`));
+  const missingEnv = Array.isArray(adminProviderStatus.missing_env) ? adminProviderStatus.missing_env : [];
+  const healthActions = Array.isArray(health?.next_actions) ? health.next_actions : [];
+  const providerActions = Array.isArray(providerStatus?.next_actions) ? providerStatus.next_actions : [];
+  const adminProviderActions = Array.isArray(adminProviderStatus.next_actions) ? adminProviderStatus.next_actions : [];
+  const nextActions = [...providerActions, ...adminProviderActions, ...healthActions].slice(0, 3);
+  const nextSteps = formatProviderNextSteps(readiness);
   const lines = [
     `<b>${escapeHtml(service.title)} Workspace</b>`,
     "",
-    "Choose the provider lane you want to inspect or operate.",
+    escapeHtml(workspace?.shortDescription || "Choose the provider lane you want to inspect or operate."),
     "",
-    line("Custom Details", "Live provider-styled receipt builder"),
-    line("Invoices", getProviderLaneStatus(service.slug, "invoices") === "live" ? "Live official invoice lane" : "Setup lane"),
-    line("Payouts", getProviderLaneStatus(service.slug, "payouts") === "live" ? "Live payout operations" : "Setup lane"),
-    line("Wallet Balance", getProviderLaneStatus(service.slug, "wallet-balance") === "live" ? "Live balance view" : "Setup lane"),
-    line("Provider Activity", getProviderLaneStatus(service.slug, "provider-activity") === "live" ? "Live webhook or state-sync lane" : "Setup lane"),
-  ];
+    line(
+      "Contract",
+      readinessPayload?.contract_version ||
+        capabilityPayload?.contract_version ||
+        healthPayload?.contract_version ||
+        providerStatusPayload?.contract_version ||
+        PROVIDER_CONTRACT_VERSION,
+    ),
+    providerStatus
+      ? line("API Status", `${providerStatus.status || "unknown"} · ${providerStatus.health_status || "unknown"} · ${providerStatus.health_score ?? 0}/100`)
+      : null,
+    ...(readiness ? formatProviderReadiness(readiness) : [line("Readiness", capability?.status || adminProviderStatus.status || "catalog")]),
+    ...(health ? formatProviderHealth(health) : []),
+    access.isAdmin ? line("Mode", adminProviderStatus.mode || capability?.registry_status?.mode || "—") : null,
+    access.isAdmin ? line("Invoice Features", formatProviderFeatureSummary(providerFeatures.invoice_features || capability?.registry_status?.invoice_features)) : null,
+    missingEnv.length ? line("Missing Env", missingEnv.join(", ")) : null,
+    nextActions.length ? line("Next Actions", nextActions.join("; ")) : null,
+    nextSteps.length ? "" : null,
+    nextSteps.length ? "<b>Recommended Next Steps</b>" : null,
+    ...nextSteps,
+    "",
+    "<b>Provider Lanes</b>",
+    ...laneLines,
+  ].filter(Boolean);
   await replyHtml(ctx, lines.join("\n"), buildProviderWorkspaceKeyboard(ctx, service, access));
+}
+
+function formatBalanceEntries(entries = [], emptyText) {
+  return entries.length
+    ? entries.map((entry) => `• ${escapeHtml(formatMoney(entry.amount, entry.currency))}`).join("\n")
+    : emptyText;
+}
+
+function issueProviderLabel(issue = {}) {
+  const metadata = issue.metadata || issue.metadata_json || {};
+  return issue.provider || issue.payment_provider || metadata.provider || metadata.payment_provider || "provider";
+}
+
+function eventProviderLabel(event = {}) {
+  return event.provider || event.source || event.payment_provider || event.provider_key || "provider";
+}
+
+function belongsToProvider(item, providerSlug, getLabel) {
+  const label = String(getLabel(item) || "").toLowerCase();
+  return label === providerSlug || label.includes(providerSlug);
+}
+
+async function handleProviderPayouts(ctx, slug) {
+  const service = getService(slug);
+  if (!service || !isPaymentProviderService(service)) {
+    await replyHtml(ctx, "Unknown payment provider. Open the provider workspace again.", buildServiceGroupsKeyboard(ctx));
+    return;
+  }
+
+  if (!(await requireAdmin(ctx, `${service.title} payouts`))) return;
+  rememberProviderContext(ctx, { provider: service.slug, lane: "payouts", action: `PROVIDER_PO:${service.slug}` });
+  await handlePayPalPayouts(ctx, {
+    provider: service.slug,
+    providerState: "ALL",
+    status: "ALL",
+    page: 1,
+    notice: `${service.title} payout workspace`,
+  });
+}
+
+async function handleProviderBalance(ctx, slug) {
+  const service = getService(slug);
+  if (!service || !isPaymentProviderService(service)) {
+    await replyHtml(ctx, "Unknown payment provider. Open the provider workspace again.", buildServiceGroupsKeyboard(ctx));
+    return;
+  }
+
+  if (!(await requireAdmin(ctx, `${service.title} balance`))) return;
+  rememberScreen(ctx, `PROVIDER_BAL:${service.slug}`);
+  const readinessPayload = await getProviderReadinessPayload(service.slug);
+  const readiness = readinessPayload?.data || null;
+  const status = providerOperationStatus(readiness, "balance");
+  if (readiness && !providerOperationImplemented(readiness, "balance")) {
+    await replyHtml(
+      ctx,
+      [
+        `<b>${escapeHtml(service.title)} · Wallet Balance</b>`,
+        "",
+        line("Status", providerLaneStatusLabel(status)),
+        "Provider balance support needs a signed balance client, account mapping, audit logging, and sandbox validation before it can be operated here.",
+      ].join("\n"),
+      buildProviderDetailKeyboard(ctx, service),
+    );
+    return;
+  }
+
+  const payload = await providerApiGet(
+    providerRoutes.balance(service.slug),
+    {},
+    contractShapes.okObject,
+  ).catch(() => null);
+  if (!payload) {
+    await replyHtml(
+      ctx,
+      [
+        `<b>${escapeHtml(service.title)} · Wallet Balance</b>`,
+        "",
+        line("Status", "Unavailable"),
+        "The provider balance endpoint did not return a compatible response. Check provider readiness and API deployment status.",
+      ].join("\n"),
+      buildProviderDetailKeyboard(ctx, service, `PROVIDER_BAL:${service.slug}`),
+    );
+    return;
+  }
+
+  const balance = payload.data || payload.balance || {};
+  const available = Array.isArray(balance.available) ? balance.available : [];
+  const pending = Array.isArray(balance.pending) ? balance.pending : [];
+  const lines = [
+    `<b>${escapeHtml(service.title)} · Wallet Balance</b>`,
+    "",
+    line("Mode", balance.mode === "connected_account" ? "Connected account" : "Platform"),
+    line("Environment", balance.livemode ? "Live" : "Sandbox"),
+    balance.connected_account_id ? line("Connected Account", balance.connected_account_id) : null,
+    "",
+    "<b>Available</b>",
+    formatBalanceEntries(available, "No available balances returned."),
+    "",
+    "<b>Pending</b>",
+    formatBalanceEntries(pending, "No pending balances returned."),
+  ].filter(Boolean);
+  await replyHtml(ctx, lines.join("\n"), buildProviderDetailKeyboard(ctx, service, `PROVIDER_BAL:${service.slug}`));
+}
+
+async function handleProviderWebhooks(ctx, slug) {
+  const service = getService(slug);
+  if (!service || !isPaymentProviderService(service)) {
+    await replyHtml(ctx, "Unknown payment provider. Open the provider workspace again.", buildServiceGroupsKeyboard(ctx));
+    return;
+  }
+
+  if (!(await requireAdmin(ctx, `${service.title} webhook activity`))) return;
+  rememberScreen(ctx, `PROVIDER_WEBHOOKS:${service.slug}`);
+  const activityPayload = await providerApiGet(
+    providerRoutes.activity(service.slug),
+    { limit: 12 },
+    contractShapes.providerActivityList,
+  ).catch(() => null);
+  const adminPayload = activityPayload ? null : await adminGet("/api/admin/webhooks", { provider: service.slug, limit: 12 }).catch(() => ({ data: [] }));
+  const events = activityPayload?.data || dataList(adminPayload, "events", "items");
+  const providerEvents = activityPayload ? events : events.filter((event) => belongsToProvider(event, service.slug, eventProviderLabel));
+  const visibleEvents = (providerEvents.length ? providerEvents : events).slice(0, 8);
+  const lines = [
+    `<b>${escapeHtml(service.title)} · Activity</b>`,
+    "",
+    line("Matched", providerEvents.length || "recent provider events"),
+    activityPayload?.pagination ? line("Next Cursor", activityPayload.pagination.next_cursor || "none") : null,
+    "",
+    ...(visibleEvents.length ? visibleEvents.map(formatWebhookEvent) : ["No recent webhook events found."]),
+  ].filter(Boolean);
+  await replyHtml(ctx, lines.join("\n"), buildProviderDetailKeyboard(ctx, service, `PROVIDER_WEBHOOKS:${service.slug}`));
+}
+
+async function handleProviderIssues(ctx, slug) {
+  const service = getService(slug);
+  if (!service || !isPaymentProviderService(service)) {
+    await replyHtml(ctx, "Unknown payment provider. Open the provider workspace again.", buildServiceGroupsKeyboard(ctx));
+    return;
+  }
+
+  if (!(await requireAdmin(ctx, `${service.title} payment issues`))) return;
+  rememberScreen(ctx, `PROVIDER_ISSUES:${service.slug}`);
+  const payload = await adminGet("/api/admin/payment-issues", { provider: service.slug, status: "OPEN", limit: 12 }).catch(() => ({ data: [] }));
+  const issues = dataList(payload, "issues", "items");
+  const providerIssues = issues.filter((issue) => belongsToProvider(issue, service.slug, issueProviderLabel));
+  const visibleIssues = (providerIssues.length ? providerIssues : issues).slice(0, 8);
+  const lines = [
+    `<b>${escapeHtml(service.title)} · Issues</b>`,
+    "",
+    line("Matched", providerIssues.length || "recent open issues"),
+    "",
+    ...(visibleIssues.length ? visibleIssues.map(formatIssue) : ["No open payment issues found."]),
+  ];
+  await replyHtml(ctx, lines.join("\n"), buildProviderDetailKeyboard(ctx, service, `PROVIDER_ISSUES:${service.slug}`));
 }
 
 async function handleProviderLane(ctx, slug, laneId) {
   const service = getService(slug);
-  const lane = PROVIDER_LANE_DETAILS[laneId];
+  const workspace = getProviderWorkspace(slug);
+  const manifestLane = getProviderLane(slug, laneId);
+  const lane = manifestLane || PROVIDER_LANE_DETAILS[laneId];
   if (!service || !isPaymentProviderService(service) || !lane) {
     await replyHtml(ctx, "Unknown provider lane. Open the provider workspace again.", buildServiceGroupsKeyboard(ctx));
     return;
   }
 
-  if (laneId === "custom-details") {
+  if (laneId === "custom-details" || lane.intent === "custom") {
     await startServiceComposer(ctx, service, { mode: "custom_details" });
     return;
   }
 
-  if (!(await requireAdmin(ctx, `${service.title} ${lane.label}`))) return;
-  rememberScreen(ctx, `PROVIDER:${service.slug}:${laneId}`);
-  const status = getProviderLaneStatus(service.slug, laneId);
+  const requiresAdmin = lane.requiresAdmin !== false;
+  const allowed = requiresAdmin
+    ? await requireAdmin(ctx, `${service.title} ${lane.label}`)
+    : await requireCapability(ctx, CAPABILITIES.SERVICES_USE, `${service.title} ${lane.label}`);
+  if (!allowed) return;
 
-  if (service.slug === "stripe" && laneId === "wallet-balance" && status === "live") {
-    const payload = await adminGet("/api/admin/payment-providers/stripe/balance");
-    const balance = payload.balance || {};
-    const available = Array.isArray(balance.available) ? balance.available : [];
-    const pending = Array.isArray(balance.pending) ? balance.pending : [];
-    const lines = [
-      "<b>Stripe · Wallet Balance</b>",
-      "",
-      line("Mode", balance.mode === "connected_account" ? "Connected account" : "Platform"),
-      line("Environment", balance.livemode ? "Live" : "Sandbox"),
-      balance.connected_account_id ? line("Connected Account", balance.connected_account_id) : null,
-      "",
-      "<b>Available</b>",
-      available.length
-        ? available.map((entry) => `• ${escapeHtml(formatMoney(entry.amount, entry.currency))}`).join("\n")
-        : "No available balances returned.",
-      "",
-      "<b>Pending</b>",
-      pending.length
-        ? pending.map((entry) => `• ${escapeHtml(formatMoney(entry.amount, entry.currency))}`).join("\n")
-        : "No pending balances returned.",
-    ].filter(Boolean);
-    const keyboard = new InlineKeyboard()
-      .text("🔄 Refresh", buildCallbackData(ctx, "PROVIDER_LANE:stripe:wallet-balance"))
-      .row()
-      .text(`⬅️ ${service.title}`, buildCallbackData(ctx, `PROVIDER:${service.slug}`))
-      .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
-    await replyHtml(ctx, lines.join("\n"), keyboard);
+  rememberScreen(ctx, `PROVIDER_LANE:${service.slug}:${laneId}`);
+  rememberProviderContext(ctx, { provider: service.slug, lane: laneId, action: `PROVIDER_LANE:${service.slug}:${laneId}` });
+  const status = getProviderLaneStatus(service.slug, laneId);
+  const intentBalanceLane = findProviderLaneByIntent(service, "balance");
+  const intentActivityLane = findProviderLaneByIntent(service, "activity");
+
+  if (status === "live" && (lane.botAction === "PP:INV" || lane.botAction === `PROVIDER_INV:${service.slug}` || laneId === "invoices")) {
+    await handlePayPalInvoices(ctx, {
+      provider: service.slug,
+      page: 1,
+      notice: `${service.title} invoice workspace`,
+    });
+    return;
+  }
+
+  if (status === "live" && (lane.botAction === "PP:PO" || lane.botAction === `PROVIDER_PO:${service.slug}` || laneId === "payouts")) {
+    if (service.slug === "paypal") {
+      await handlePayPalPayouts(ctx, {
+        provider: service.slug,
+        page: 1,
+        notice: `${service.title} payout workspace`,
+      });
+      return;
+    }
+    await handleProviderPayouts(ctx, service.slug);
+    return;
+  }
+
+  if (status === "live" && (lane.botAction === `PROVIDER_BAL:${service.slug}` || laneId === "wallet-balance" || lane.id === intentBalanceLane?.id)) {
+    await handleProviderBalance(ctx, service.slug);
+    return;
+  }
+
+  if (status === "live" && (lane.botAction === `PROVIDER_WEBHOOKS:${service.slug}` || laneId === "provider-activity" || lane.id === intentActivityLane?.id)) {
+    await handleProviderWebhooks(ctx, service.slug);
     return;
   }
 
   const lines = [
     `<b>${escapeHtml(service.title)} · ${escapeHtml(lane.label)}</b>`,
     "",
-    line("Status", status === "live" ? "Live" : "Setup required"),
+    line("Status", providerLaneStatusLabel(status)),
+    workspace ? line("Environment", (workspace.environments || []).join(" / ")) : null,
+    line("Intent", lane.intent || "workspace"),
     "",
     escapeHtml(lane.summary),
     "",
+    line("Next step", providerLaneNextStep(service, lane, status)),
+    "",
     status === "live"
       ? "This lane has backend support where provider readiness and admin permissions are configured."
-      : "This lane is intentionally visible but disabled until signed API clients, webhook verification, idempotency, state mapping, ledger rules, and sandbox tests are completed.",
-  ];
+      : "This lane is visible for navigation consistency, but it stays in setup until signed API clients, webhook verification, idempotency, state mapping, ledger rules, and sandbox tests are completed.",
+  ].filter(Boolean);
 
-  const keyboard = new InlineKeyboard();
-  if (service.slug === "stripe" && laneId === "invoices") {
-    keyboard.text("📄 Open Stripe Invoices", buildCallbackData(ctx, "PROVIDER_INV:stripe"));
-  } else if (service.slug === "crypto" && laneId === "invoices") {
-    keyboard.text("📄 Open Crypto Invoices", buildCallbackData(ctx, "PROVIDER_INV:crypto"));
-  } else if (laneId === "provider-activity") {
-    keyboard.text("⚠️ Payment Issues", buildCallbackData(ctx, "ISSUES"));
-  }
-
-  keyboard
-    .row()
-    .text(`⬅️ ${service.title}`, buildCallbackData(ctx, `PROVIDER:${service.slug}`))
-    .text("🏠 Main Menu", buildCallbackData(ctx, "MENU"));
-  await replyHtml(ctx, lines.join("\n"), keyboard);
+  await replyHtml(ctx, lines.join("\n"), buildProviderLaneKeyboard(ctx, service, workspace, lane));
 }
 
 function invoiceListLabel(invoice, index) {
@@ -1667,9 +2352,15 @@ function payoutListLabel(payout, index) {
 
 async function handlePayPalInvoices(ctx, updates = {}) {
   if (!(await requireAdmin(ctx, "PayPal invoices"))) return;
-  rememberScreen(ctx, "PP:INV");
   const { notice, ...viewUpdates } = updates;
   const view = updatePayPalView(ctx, "invoice", viewUpdates);
+  rememberScreen(ctx, view.provider ? `PROVIDER_INV:${view.provider}` : "PP:INV");
+  rememberProviderContext(ctx, {
+    provider: view.provider || "paypal",
+    lane: "invoices",
+    filters: getPayPalQueryFromView(view),
+    action: view.provider ? `PROVIDER_INV:${view.provider}` : "PP:INV",
+  });
   const payload = await adminGet("/api/admin/invoices", getPayPalQueryFromView(view));
   const items = Array.isArray(payload.data) ? payload.data : [];
   const keyed = cachePayPalRecords(ctx, "invoice", items);
@@ -1692,14 +2383,21 @@ async function handlePayPalInvoices(ctx, updates = {}) {
 
 async function handlePayPalPayouts(ctx, updates = {}) {
   if (!(await requireAdmin(ctx, "PayPal payouts"))) return;
-  rememberScreen(ctx, "PP:PO");
   const { notice, ...viewUpdates } = updates;
   const view = updatePayPalView(ctx, "payout", viewUpdates);
+  rememberScreen(ctx, view.provider ? `PROVIDER_PO:${view.provider}` : "PP:PO");
+  rememberProviderContext(ctx, {
+    provider: view.provider || "paypal",
+    lane: "payouts",
+    filters: getPayPalQueryFromView(view),
+    action: view.provider ? `PROVIDER_PO:${view.provider}` : "PP:PO",
+  });
   const payload = await adminGet("/api/admin/payouts", getPayPalQueryFromView(view));
   const items = Array.isArray(payload.data) ? payload.data : [];
   const keyed = cachePayPalRecords(ctx, "payout", items);
+  const providerTitle = providerTitleFromKey(view.provider);
   const lines = [
-    "<b>Official PayPal Payouts</b>",
+    `<b>Official ${escapeHtml(providerTitle)} Payouts</b>`,
     notice ? escapeHtml(notice) : null,
     line("Total", payload.pagination?.total ?? items.length),
     line("Page", payload.pagination?.page || view.page),
@@ -1801,7 +2499,7 @@ async function handlePayPalInvoiceAction(ctx, action, key, options = {}) {
         line("Updated By", ctx.from?.username ? `@${ctx.from.username}` : ctx.from?.id || "unknown"),
         line("Time", new Date().toLocaleString()),
       ].join("\n"),
-      buildInvoiceResultKeyboard(ctx, key),
+      buildInvoiceResultKeyboard(ctx, key, invoice),
     );
     return;
   }
@@ -1817,7 +2515,7 @@ async function handlePayPalInvoiceAction(ctx, action, key, options = {}) {
         line("Status", result.status || "CANCELLED"),
         line("Provider", result.provider || result.metadata?.provider || invoice.provider || "stripe"),
       ].join("\n"),
-      buildInvoiceResultKeyboard(ctx, key),
+      buildInvoiceResultKeyboard(ctx, key, invoice),
     );
     return;
   }
@@ -1835,7 +2533,7 @@ async function handlePayPalInvoiceAction(ctx, action, key, options = {}) {
         line("Provider", result.provider || result.metadata?.provider || invoice.provider || "crypto"),
         line("Review", result.metadata?.settlement_review_required ? "required" : "requested"),
       ].join("\n"),
-      buildInvoiceResultKeyboard(ctx, key),
+      buildInvoiceResultKeyboard(ctx, key, invoice),
     );
     return;
   }
@@ -1843,7 +2541,7 @@ async function handlePayPalInvoiceAction(ctx, action, key, options = {}) {
   if (action === "release") {
     const guard = invoiceReleaseGuard(invoice);
     if (guard) {
-      await sendPaymentGuardCard(ctx, "Invoice Release Blocked", guard, buildInvoiceResultKeyboard(ctx, key));
+      await sendPaymentGuardCard(ctx, "Invoice Release Blocked", guard, buildInvoiceResultKeyboard(ctx, key, invoice));
       return;
     }
     if (!options.confirmed) {
@@ -1860,7 +2558,7 @@ async function handlePayPalInvoiceAction(ctx, action, key, options = {}) {
           line("Recipient", summary.recipient_email || "unknown"),
           line("Amount", formatMoney(summary.amount, summary.currency)),
         ].join("\n"),
-        buildInvoiceConfirmKeyboard(ctx, key),
+        buildInvoiceConfirmKeyboard(ctx, key, invoice),
       );
       return;
     }
@@ -1896,7 +2594,7 @@ async function handlePayPalInvoiceAction(ctx, action, key, options = {}) {
         line("Released By", ctx.from?.username ? `@${ctx.from.username}` : ctx.from?.id || "unknown"),
         line("Time", new Date().toLocaleString()),
       ].join("\n"),
-      buildInvoiceResultKeyboard(ctx, key),
+      buildInvoiceResultKeyboard(ctx, key, invoice),
     );
   }
 }
@@ -1913,7 +2611,7 @@ async function handlePayPalPayoutAction(ctx, action, key, options = {}) {
   if (action === "approve") {
     const guard = payoutActionGuard(payout, "approve");
     if (guard) {
-      await sendPaymentGuardCard(ctx, "Payout Approval Blocked", guard, buildPayoutResultKeyboard(ctx, key));
+      await sendPaymentGuardCard(ctx, "Payout Approval Blocked", guard, buildPayoutResultKeyboard(ctx, key, payout));
       return;
     }
     if (!options.confirmed) {
@@ -1932,7 +2630,7 @@ async function handlePayPalPayoutAction(ctx, action, key, options = {}) {
           line("Total Debit", formatMoney(summary.total_debit, summary.currency)),
           line("Risk", payout.risk_decision || "UNKNOWN"),
         ].join("\n"),
-        buildPayoutConfirmKeyboard(ctx, "approve", key),
+        buildPayoutConfirmKeyboard(ctx, "approve", key, payout),
       );
       return;
     }
@@ -1962,7 +2660,7 @@ async function handlePayPalPayoutAction(ctx, action, key, options = {}) {
         line("Approved By", ctx.from?.username ? `@${ctx.from.username}` : ctx.from?.id || "unknown"),
         line("Time", new Date().toLocaleString()),
       ].join("\n"),
-      buildPayoutResultKeyboard(ctx, key),
+      buildPayoutResultKeyboard(ctx, key, payout),
     );
     return;
   }
@@ -1992,7 +2690,7 @@ async function handlePayPalPayoutAction(ctx, action, key, options = {}) {
         line("Updated By", ctx.from?.username ? `@${ctx.from.username}` : ctx.from?.id || "unknown"),
         line("Time", new Date().toLocaleString()),
       ].join("\n"),
-      buildPayoutResultKeyboard(ctx, key),
+      buildPayoutResultKeyboard(ctx, key, payout),
     );
     return;
   }
@@ -2000,7 +2698,7 @@ async function handlePayPalPayoutAction(ctx, action, key, options = {}) {
   if (action === "cancel") {
     const guard = payoutActionGuard(payout, "cancel");
     if (guard) {
-      await sendPaymentGuardCard(ctx, "Payout Cancel Blocked", guard, buildPayoutResultKeyboard(ctx, key));
+      await sendPaymentGuardCard(ctx, "Payout Cancel Blocked", guard, buildPayoutResultKeyboard(ctx, key, payout));
       return;
     }
     if (!options.confirmed) {
@@ -2017,7 +2715,7 @@ async function handlePayPalPayoutAction(ctx, action, key, options = {}) {
           line("Provider", payout.official_paypal?.provider_item_status || payout.metadata?.provider_item_status || "UNKNOWN"),
           line("Amount", formatMoney(summary.amount, summary.currency)),
         ].join("\n"),
-        buildPayoutConfirmKeyboard(ctx, "cancel", key),
+        buildPayoutConfirmKeyboard(ctx, "cancel", key, payout),
       );
       return;
     }
@@ -2046,7 +2744,7 @@ async function handlePayPalPayoutAction(ctx, action, key, options = {}) {
         line("Submitted By", ctx.from?.username ? `@${ctx.from.username}` : ctx.from?.id || "unknown"),
         line("Time", new Date().toLocaleString()),
       ].join("\n"),
-      buildPayoutResultKeyboard(ctx, key),
+      buildPayoutResultKeyboard(ctx, key, payout),
     );
     return;
   }
@@ -2054,7 +2752,7 @@ async function handlePayPalPayoutAction(ctx, action, key, options = {}) {
   if (action === "reject") {
     const guard = payoutActionGuard(payout, "reject");
     if (guard) {
-      await sendPaymentGuardCard(ctx, "Payout Rejection Blocked", guard, buildPayoutResultKeyboard(ctx, key));
+      await sendPaymentGuardCard(ctx, "Payout Rejection Blocked", guard, buildPayoutResultKeyboard(ctx, key, payout));
       return;
     }
     ctx.session.meta.pendingPayPalAction = {
@@ -2111,7 +2809,7 @@ async function handlePendingPayPalText(ctx, text) {
         line("Rejected By", ctx.from?.username ? `@${ctx.from.username}` : ctx.from?.id || "unknown"),
         line("Time", new Date().toLocaleString()),
       ].join("\n"),
-      pending.key ? buildPayoutResultKeyboard(ctx, pending.key) : buildPayPalWorkspaceKeyboard(ctx, await getAccessStatus(ctx)),
+      pending.key ? buildPayoutResultKeyboard(ctx, pending.key, payout) : buildPayPalWorkspaceKeyboard(ctx, await getAccessStatus(ctx)),
     );
     return true;
   }
@@ -2207,28 +2905,100 @@ async function handleComposerAction(ctx, action) {
   }
 }
 
-function buildQuery(params = {}) {
-  const query = new URLSearchParams();
-  Object.entries(params).forEach(([key, value]) => {
-    if (value === undefined || value === null || value === "" || value === "ALL") {
-      return;
-    }
-    query.set(key, String(value));
-  });
-  const text = query.toString();
-  return text ? `?${text}` : "";
-}
-
 async function adminGet(path, params = {}) {
-  const response = await httpClient.get(null, `${config.apiUrl}${path}${buildQuery(params)}`, {
+  const response = await httpClient.get(null, buildApiUrl(config.apiUrl, path, params), {
     timeout: 12000,
   });
   return response.data;
 }
 
+async function providerApiGet(path, params = {}, contract = null) {
+  const response = await httpClient.get(null, buildApiUrl(config.apiUrl, path, params), {
+    timeout: 12000,
+  });
+  return validateApiResponseContract(response.data, contract, {
+    method: "GET",
+    url: path,
+    requestId: response.data?.requestId,
+  });
+}
+
+async function getProviderReadinessPayload(provider) {
+  return providerApiGet(
+    providerRoutes.providerReadiness(provider),
+    {},
+    contractShapes.providerReadiness,
+  ).catch(() => null);
+}
+
+async function getProviderHealthPayload(provider) {
+  return providerApiGet(
+    providerRoutes.providerHealth(provider),
+    {},
+    contractShapes.providerHealth,
+  ).catch(() => null);
+}
+
+async function getProviderStatusPayload(provider) {
+  return providerApiGet(
+    providerRoutes.providerStatus(provider),
+    {},
+    contractShapes.providerStatus,
+  ).catch(() => null);
+}
+
+async function getProviderCapabilityPayload(provider) {
+  return providerApiGet(
+    providerRoutes.provider(provider),
+    {},
+    contractShapes.okObject,
+  ).catch(() => null);
+}
+
+function providerOperationStatus(readiness, operation) {
+  const item = readiness?.operations?.find((entry) => entry.operation === operation);
+  return item?.status || "setup";
+}
+
+function providerOperationImplemented(readiness, operation) {
+  const item = readiness?.operations?.find((entry) => entry.operation === operation);
+  return Boolean(item?.implemented);
+}
+
+function formatProviderReadiness(readiness = {}) {
+  const summary = readiness.summary || {};
+  const missingEnv = Array.isArray(readiness.missing_env) ? readiness.missing_env : [];
+  return [
+    line("Readiness", readiness.ready ? "Ready" : readiness.status || "Needs setup"),
+    line("Live Ops", summary.live_operations ?? 0),
+    line("Setup Ops", summary.setup_operations ?? 0),
+    missingEnv.length ? line("Missing Env", missingEnv.join(", ")) : null,
+  ].filter(Boolean);
+}
+
+function formatProviderHealth(health = {}) {
+  return [
+    line("Health", `${health.status || "unknown"} · ${health.score ?? 0}/100`),
+    line("Failed Webhooks", health.failed_webhooks ?? 0),
+    line("Open Issues", health.unresolved_issues ?? 0),
+  ];
+}
+
+function formatProviderNextSteps(readiness = {}) {
+  const steps = Array.isArray(readiness.recommended_next_steps)
+    ? readiness.recommended_next_steps.slice(0, 3)
+    : [];
+  return steps.map((step) => `• ${escapeHtml(step.label || step.code || "Review provider setup")}`);
+}
+
+function buildMutationIdempotencyKey(path, body = {}) {
+  return createMutationIdempotencyKey(path, body);
+}
+
 async function adminPost(path, body = {}, options = {}) {
-  const response = await httpClient.post(null, `${config.apiUrl}${path}`, body, {
+  const response = await httpClient.post(null, buildApiUrl(config.apiUrl, path), body, {
     timeout: 15000,
+    idempotencyKey: options.idempotencyKey || buildMutationIdempotencyKey(path, body),
     ...options,
   });
   return response.data;
@@ -2285,6 +3055,71 @@ function formatOrder(order) {
   ].join(" — ");
 }
 
+function dataList(payload, ...keys) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.data)) return payload.data;
+  for (const key of keys) {
+    if (Array.isArray(payload?.[key])) return payload[key];
+  }
+  return [];
+}
+
+function adminReadFallback(error) {
+  return {
+    data: [],
+    error: error?.userMessage || error?.message || "API request failed",
+  };
+}
+
+function unavailableSummary(sources) {
+  const failed = sources
+    .filter(([, payload]) => payload?.error)
+    .map(([label]) => label);
+  return failed.length ? `Some sections could not be loaded: ${failed.join(", ")}.` : null;
+}
+
+function formatProvider(provider = {}) {
+  const id = provider.provider || provider.slug || provider.id || provider.name || "provider";
+  const label = provider.display_name || provider.displayName || provider.name || id;
+  const enabled = provider.enabled === false || provider.status === "disabled" ? "disabled" : (provider.status || "enabled");
+  const mode = provider.mode || provider.environment || provider.provider_mode || "";
+  return `• <b>${escapeHtml(label)}</b> — ${escapeHtml(enabled)}${mode ? ` — ${escapeHtml(mode)}` : ""}`;
+}
+
+function formatWebhookEvent(event = {}) {
+  const type = event.event_type || event.type || event.provider_event_type || "webhook";
+  const provider = event.provider || event.source || event.payment_provider || "provider";
+  const status = event.status || event.processing_status || "received";
+  return `• <b>${escapeHtml(type)}</b> — ${escapeHtml(provider)} — ${escapeHtml(status)}`;
+}
+
+function formatRiskFlag(flag = {}) {
+  const subject = flag.user_email || flag.user_id || flag.resource_id || flag.id || "resource";
+  const reason = flag.reason || flag.risk_reason || flag.flag_type || "risk flag";
+  const level = flag.severity || flag.level || flag.status || "review";
+  return `• <b>${escapeHtml(subject)}</b> — ${escapeHtml(level)} — ${escapeHtml(truncate(reason, 80))}`;
+}
+
+function formatClient(user = {}) {
+  const name = user.email || user.username || user.name || user.id || user.user_id || "client";
+  const status = user.status || user.account_status || "active";
+  const balance = user.balance_label || (user.wallet_balance !== undefined ? formatMoney(user.wallet_balance, user.wallet_currency) : "");
+  return `• <b>${escapeHtml(name)}</b> — ${escapeHtml(status)}${balance ? ` — ${escapeHtml(balance)}` : ""}`;
+}
+
+function formatQueueSummary(payload = {}) {
+  const queues = Array.isArray(payload.queues) ? payload.queues : [];
+  if (!queues.length) return payload.redis_status || null;
+  const totals = queues.reduce((acc, queue) => {
+    const counts = queue.counts || {};
+    acc.waiting += Number(counts.waiting || 0);
+    acc.active += Number(counts.active || 0);
+    acc.failed += Number(counts.failed || 0);
+    return acc;
+  }, { waiting: 0, active: 0, failed: 0 });
+  return `${queues.length} queues · ${totals.waiting} waiting · ${totals.active} active · ${totals.failed} failed`;
+}
+
 async function getAdminDashboardSnapshot() {
   const [health, invoices, payouts, issues, orders] = await Promise.all([
     httpClient.get(null, `${config.apiUrl}/health`, { timeout: 5000 })
@@ -2306,101 +3141,35 @@ async function getAdminDashboardSnapshot() {
 }
 
 async function handleMenu(ctx) {
-  resetSession(ctx);
-  resetNavigation(ctx, "MENU");
-  const access = await getAdminStatus(ctx);
-  const dashboard = access.isAdmin ? await getAdminDashboardSnapshot() : null;
-  const title = access.isOwner ? "Transferly Owner Console" : access.isAdmin ? "Transferly Admin Bot" : access.isAuthorized ? "Transferly Bot" : "Transferly Access";
-  const userLines = [
-    line("Telegram ID", ctx.from?.id || "unknown"),
-    line("Username", ctx.from?.username ? `@${ctx.from.username}` : "none"),
-    line("Role", access.role || ROLES.GUEST),
-    line("Access", access.isAuthorized ? access.status : "NOT_AUTHORIZED"),
-    line("Subscription", access.subscriptionExpired ? "expired" : formatExpiry(access.subscriptionExpiresAt)),
-    line("Admin Source", access.adminSource),
-  ];
-  const guestBody = [
-    `<b>💼 ${escapeHtml(title)}</b>`,
-    "",
-    "🔒 Your Telegram account is not authorized to use Transferly services yet.",
-    "",
-    "<b>👤 Identity</b>",
-    ...userLines,
-    "",
-    "Send your Telegram ID to an administrator to request access.",
-  ];
-  const body = !access.isAuthorized && !access.isAdmin ? guestBody : [
-    `<b>💼 ${escapeHtml(title)}</b>`,
-    "",
-    access.isOwner
-      ? "👑 Welcome, Owner. You can manage access, subscriptions, admins, payment operations, and Transferly services."
-      : access.isAdmin
-      ? "🛡️ Welcome, Administrator. You have access to Transferly payment operations, PayPal invoice review, and payout controls."
-      : "👋 Welcome to Transferly. Use this bot for balances, service receipts, referrals, and PayPal-related workspaces.",
-    "",
-    "<b>👤 User Information</b>",
-    ...userLines,
-    "",
-    dashboard ? "<b>📊 Live Operations</b>" : null,
-    dashboard ? line("API", dashboard.api) : null,
-    dashboard ? line("Invoices", dashboard.invoices) : null,
-    dashboard ? line("Payouts", dashboard.payouts) : null,
-    dashboard ? line("Open Issues", dashboard.issues) : null,
-    dashboard ? line("Funding Review", dashboard.fundingReview) : null,
-    dashboard ? "" : null,
-    "<b>⚡ Main Workspaces</b>",
-    "🏦 Bank Slips  •  ✉️ Flash Emails",
-    "₿ Crypto Receipts  •  🧰 Utilities",
-    access.isAdmin ? "📄 PayPal Invoices  •  💸 PayPal Payouts" : "🧾 Service Receipts  •  💰 Balance",
-    "",
-    access.isOwner
-      ? "Use the buttons below for owner, admin, and service workflows."
-      : access.isAdmin
-        ? "Use the buttons below for the fastest admin workflow."
-      : "Use the buttons below for Transferly services, balances, receipts, profile, and referrals.",
-  ].filter((item) => item !== null);
-  await replyHtml(ctx, body.join("\n"), buildMainMenuKeyboard(ctx, access));
+  await handleStart(ctx);
 }
 
 async function handleStart(ctx) {
   resetSession(ctx);
   resetNavigation(ctx, "START");
   const access = await getAdminStatus(ctx);
-  const title = access.isOwner
-    ? "Transferly Owner"
-    : access.isAdmin
-      ? "Transferly Admin"
-      : access.isAuthorized
-        ? "Transferly User"
-        : "Transferly Access";
-  const welcome = access.isOwner
-    ? "Owner console ready. Manage access, subscriptions, and payment operations from one clean workspace."
-    : access.isAdmin
-      ? "Admin workspace ready. Review invoices, payouts, issues, and system health with fewer taps."
-      : access.isAuthorized
-        ? "Welcome back. Your Transferly services, receipts, balance, and PayPal tools are ready."
-        : "Welcome to Transferly. Verify your identity below and request access to unlock services.";
   const accessLabel = access.isAuthorized ? access.status : "NOT_AUTHORIZED";
   const subscriptionLabel = access.subscriptionExpired
     ? "expired"
     : access.role === ROLES.OWNER
       ? "owner access"
       : formatExpiry(access.subscriptionExpiresAt);
-  const nextStep = access.isAuthorized
-    ? "Open Menu for the full workspace, or jump straight into Services."
-    : "Tap Whoami, copy your Telegram ID, and send it to an owner/admin for access.";
   const lines = [
-    `<b>💼 ${escapeHtml(title)}</b>`,
-    escapeHtml(welcome),
+    "<b>Welcome to Transferly</b>",
+    "Your payment operations dashboard, built for Telegram.",
     "",
-    "<b>👤 Your Access</b>",
+    "Open the Mini App to manage your dashboard, services, payments, and settings.",
+    "Use this bot for launch, support, and quick status checks.",
+    "",
+    "<b>Your account</b>",
     line("Telegram ID", ctx.from?.id || "unknown"),
-    line("Username", ctx.from?.username ? `@${ctx.from.username}` : "none"),
     line("Role", access.role || ROLES.GUEST),
     line("Status", accessLabel),
     line("Subscription", subscriptionLabel),
     "",
-    `<b>⚡ Next:</b> ${escapeHtml(nextStep)}`,
+    access.isAuthorized
+      ? "Tap Open Transferly to continue."
+      : "Tap Open Transferly to view the app, or contact an admin for access.",
   ];
   await replyHtml(ctx, lines.join("\n"), buildStartKeyboard(ctx, access));
 }
@@ -2410,88 +3179,271 @@ async function handleCancel(ctx) {
   await replyHtml(ctx, "Current bot prompt cancelled.", buildStartKeyboard(ctx, await getAdminStatus(ctx)));
 }
 
+async function handleMiniApp(ctx) {
+  await handleStart(ctx);
+}
+
+async function handleMiniAppDelegatedAction(ctx, action) {
+  const access = await getAdminStatus(ctx);
+  rememberScreen(ctx, "MINI_APP_HANDOFF");
+  clearPendingPrompts(ctx);
+  logger.info("Bot workflow delegated to Mini App", {
+    telegramId: ctx.from?.id || null,
+    action,
+    role: access.role || ROLES.GUEST,
+  });
+  const lines = [
+    "<b>Continue in Transferly</b>",
+    "",
+    "That workflow is handled inside the Mini App so the bot stays simple.",
+    "Open Transferly to continue from the dashboard.",
+  ];
+  await replyHtml(ctx, lines.join("\n"), buildMiniAppHandoffKeyboard(ctx, access));
+}
+
 async function handleHelp(ctx) {
   rememberScreen(ctx, "HELP");
   const access = await getAdminStatus(ctx);
   const lines = [
-    "<b>📚 Transferly Bot Guide</b>",
+    "<b>Transferly Help</b>",
     "",
-    "The fastest way to use the bot is through inline buttons. The visible Telegram command menu only shows the entry points; this guide lists the direct shortcuts when you need them.",
+    "The bot is your entry point. The Mini App is where dashboard work happens.",
     "",
-    "<b>🧭 Main Navigation</b>",
-    "• /start — opens a clean Transferly home screen.",
-    "• /menu — resets the current flow and returns to the main workspace menu.",
-    "• /services — opens the service catalog.",
-    "• /help — shows this full guide.",
-    "• /cancel — cancels the current prompt or typed flow.",
+    "<b>Commands</b>",
+    "• /start — open Transferly.",
+    "• /support — get help.",
+    "• /status — check availability.",
+    "• /terms — view terms guidance.",
+    "• /privacy — view privacy guidance.",
     "",
-    "<b>⬅️ Back Buttons</b>",
-    "• Back returns to the previous screen saved in your bot session.",
-    "• Main Menu always resets you to the top-level Transferly menu.",
-    "• PayPal detail screens keep their list filter and page state when you return.",
-    "",
-    "<b>👤 Account</b>",
-    "• /whoami — shows Telegram ID, username, bot role, linked Transferly user, and admin setup.",
-    "• /profile — shows the linked Transferly web profile.",
-    "• /balance — shows the linked user points balance.",
-    "• /referral — shows referral code and referral count.",
-    "",
-    "<b>🧾 Receipts</b>",
-    "• /services — browse Bank Slips, Flash Emails, Crypto Receipts, and Utilities.",
-    "• Service button flow — choose a category, choose a service, then use Quick Generate, Custom Details, History, or Balance.",
-    "• /receipts — shows latest generated receipts for the linked user.",
-    "• /history paypal — opens service-specific receipt history where supported.",
-    "• /receipt bank {\"service\":\"opay\",\"amount\":\"25.00\"} — direct receipt generation shortcut.",
-    "",
-    "<b>💳 PayPal Workspace</b>",
-    "• Services → Flash Emails → PayPal → PayPal Workspace.",
-    "• Flash Email — starts the PayPal receipt composer.",
-    "• Official Invoices — admin invoice list with status filters, pages, detail cards, Refresh, Release, and Open PayPal Link.",
-    "• Official Payouts — admin payout list with status/provider filters, pages, detail cards, Approve, Reject, Refresh, and Cancel Unclaimed.",
-    "",
-    "<b>🏥 Utility</b>",
-    "• /health — checks Transferly API health.",
-    "• /status — admin deep status with API, database, Redis, invoices, payouts, issues, and funding review.",
+    "For services, payments, settings, and advanced actions, use Open Transferly.",
   ];
 
-  if (access.isAdmin) {
-    lines.push(
-      "",
-      "<b>🛡️ Admin Payment Ops</b>",
-      "• /invoices SENT customer@example.com — list invoices by status and recipient/search text.",
-      "• /payouts PENDING recipient@example.com — list payouts by status and receiver/search text.",
-      "• /ops — payment operations summary.",
-      "• /issues — open payment issues.",
-      "• /orders — top-up orders awaiting confirmation or filtered by status.",
-      "• /users — local bot access management with List, Add, Promote, and Remove buttons.",
-      "• /reconcile — runs payment reconciliation.",
-      "",
-      "<b>💸 Admin Actions</b>",
-      "• /approve_payout PAYOUT_ID — approves a payout directly.",
-      "• /reject_payout PAYOUT_ID reason — rejects a payout with a reason.",
-      "• /cancel_unclaimed PAYOUT_ID — requests cancellation for an unclaimed PayPal payout.",
-      "• /release_invoice INVOICE_ID optional_amount optional reason — releases paid invoice funds.",
-    );
-  }
+  await replyHtml(ctx, lines.join("\n"), buildCommandHubKeyboard(ctx, access));
+}
 
-  lines.push(
+const SUPPORT_CATEGORIES = Object.freeze({
+  SUPPORT_ACCOUNT: {
+    title: "Account Help",
+    body: [
+      "Use this when you need help with access, identity, role, or subscription status.",
+      "If an administrator asks for your Telegram ID, it is shown in /start.",
+    ],
+  },
+  SUPPORT_PAYMENT: {
+    title: "Payment Help",
+    body: [
+      "Use the Mini App dashboard for payment history, invoices, payouts, provider status, and wallet details.",
+      "Contact support if a payment appears delayed, duplicated, or inconsistent.",
+    ],
+  },
+  SUPPORT_TECHNICAL: {
+    title: "Technical Issue",
+    body: [
+      "Use /status first to check whether Transferly can reach the API.",
+      "If the issue continues, include your Telegram ID, what you tried, and the approximate time it happened.",
+    ],
+  },
+  SUPPORT_CONTACT: {
+    title: "Contact Support",
+    body: [
+      "Contact support with your Telegram ID and a short description of the issue.",
+      "Do not share passwords, API keys, wallet secrets, or payment provider tokens in chat.",
+    ],
+  },
+});
+
+async function handleSupport(ctx, category = null) {
+  rememberScreen(ctx, "SUPPORT");
+  const access = await getAdminStatus(ctx);
+  const flow = ensureFlow(ctx, "support", {
+    step: category || "choose_category",
+    ttlMs: 15 * 60 * 1000,
+  });
+  flow.state = {
+    ...(flow.state || {}),
+    category: category || null,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const support = SUPPORT_CATEGORIES[category];
+  const lines = support
+    ? [
+        `<b>${escapeHtml(support.title)}</b>`,
+        "",
+        ...support.body.map((item) => `• ${escapeHtml(item)}`),
+        "",
+        "<b>Next step</b>",
+        "Choose another category or open Transferly for dashboard details.",
+      ]
+    : [
+        "<b>Transferly Support</b>",
+        "",
+        "Choose the category that best matches your issue.",
+        "",
+        "<b>Categories</b>",
+        "• Account Help — access, identity, roles, subscription.",
+        "• Payment Help — invoices, payouts, provider activity.",
+        "• Technical Issue — app, API, or launch problems.",
+        "• Contact Support — escalation guidance.",
+      ];
+
+  await replyHtml(ctx, lines.join("\n"), buildSupportKeyboard(ctx, access));
+}
+
+async function handleTerms(ctx) {
+  rememberScreen(ctx, "TERMS");
+  const access = await getAdminStatus(ctx);
+  const lines = [
+    "<b>Transferly Terms</b>",
     "",
-    "Menus automatically replace the previous bot message to keep the chat clean.",
-  );
+    "Use Transferly only for authorized account and payment workflows. Dashboard actions, service details, and advanced workflows are completed inside the Mini App.",
+    "",
+    "For the full current terms, open Transferly and review the legal section from the app.",
+  ];
+  await replyHtml(ctx, lines.join("\n"), buildGatewayKeyboard(ctx, access, { includePolicies: false }));
+}
 
-  await replyHtml(ctx, lines.join("\n"), buildScreenKeyboard(ctx, SCREEN_TYPES.DETAIL));
+async function handlePrivacy(ctx) {
+  rememberScreen(ctx, "PRIVACY");
+  const access = await getAdminStatus(ctx);
+  const lines = [
+    "<b>Transferly Privacy</b>",
+    "",
+    "This bot uses your Telegram identity to support onboarding, status checks, and support routing.",
+    "",
+    "Do not send secrets, API keys, payment provider tokens, or sensitive documents in bot chat. Use the Mini App for account workflows.",
+  ];
+  await replyHtml(ctx, lines.join("\n"), buildGatewayKeyboard(ctx, access, { includePolicies: false }));
+}
+
+const COMMAND_SECTION_GUIDES = {
+  MENU_COLLECT: {
+    title: "<b>🧾 Collections</b>",
+    summary: "Collection workflows now start from the Mini App dashboard instead of a dense bot submenu.",
+    flow: [
+      "Open Transferly and continue from the home dashboard.",
+      "Use the Mini App for invoices, provider context, ledger review, and guided support.",
+      "Use the bot only for help, support, and quick status checks.",
+    ],
+    actions: [
+      "Open Transferly, Help, Support, and Status.",
+    ],
+    miniAppMirror: "Mini App owns invoices, provider workspaces, activity, and support handoff.",
+    bestFor: "Keeping chat navigation minimal while moving collection work to the dashboard.",
+    safety: "Payment mutations remain admin-gated in the production workflows that own them.",
+  },
+  MENU_SEND: {
+    title: "<b>💸 Sending</b>",
+    summary: "Sending and payout workflows now belong in the Mini App rather than the bot menu.",
+    flow: [
+      "Open Transferly and continue from the home dashboard.",
+      "Use the Mini App for payout queues, provider send lanes, risk, and audit views.",
+      "Use Status when a user needs a fast service availability signal from chat.",
+    ],
+    actions: [
+      "Open Transferly, Help, Support, and Status.",
+    ],
+    miniAppMirror: "Mini App owns payouts, wallet, activity, risk, and provider send workspaces.",
+    bestFor: "Keeping payout operations out of crowded chat menus.",
+    safety: "Mutation buttons stay capability-gated in the workflows that own payout handling.",
+  },
+  MENU_ACCOUNT: {
+    title: "<b>🏦 Account</b>",
+    summary: "Account details are available in the Mini App; the bot keeps only access and support context.",
+    flow: [
+      "Open Transferly for profile, wallet, receipts, referrals, and settings.",
+      "Use /start to confirm Telegram ID, role, and authorization state.",
+      "Use Help or Support when a user needs guidance from chat.",
+    ],
+    actions: [
+      "Open Transferly, Help, Support, and Start.",
+      "No duplicate account dashboard is maintained in the bot.",
+    ],
+    miniAppMirror: "Mini App owns profile, wallet, receipts, referral, and account history.",
+    bestFor: "Simple identity checks and support handoff.",
+    safety: "Never expose private tokens, provider secrets, or raw webhook payloads in account replies.",
+  },
+  MENU_ADMIN: {
+    title: "<b>🧩 Admin</b>",
+    summary: "Admin operations should continue in the Mini App; the bot keeps a small diagnostic surface.",
+    flow: [
+      "Open Transferly for operations, providers, risk, security, activity, and settings.",
+      "Use Status for a compact service availability snapshot.",
+      "Use Help or Support when coordinating support in chat.",
+    ],
+    actions: [
+      "Open Transferly, Status, Help, and Support.",
+    ],
+    miniAppMirror: "Mini App owns dashboard, analytics, security, activity, and operations views.",
+    bestFor: "Fast operator orientation without duplicating the admin console in Telegram.",
+    safety: "Admin-only actions must keep audit logs, avoid raw secret logging, and preserve ledger integrity.",
+  },
+  MENU_SUPPORT: {
+    title: "<b>🛟 Support & Diagnostics</b>",
+    summary: "Use the bot for lightweight support context, then continue deeper workflows in the Mini App.",
+    flow: [
+      "Use Help and Support to confirm the user's need and available commands.",
+      "Check Status before escalating a connectivity issue.",
+      "Open Transferly when the user needs dashboard actions or richer support context.",
+    ],
+    actions: [
+      "Open Transferly, Help, Support, Status, and Start.",
+    ],
+    miniAppMirror: "Mini App owns support, profile, dashboard, provider status, and diagnostics.",
+    bestFor: "Guided recovery, access checks, and support handoff without clutter.",
+    safety: "Keep replies helpful but avoid exposing bearer tokens, webhook headers, or private runtime state.",
+  },
+};
+
+function formatCommandSectionBody(section) {
+  const guide = COMMAND_SECTION_GUIDES[section] || COMMAND_SECTION_GUIDES.MENU_SUPPORT;
+  return [
+    guide.title,
+    "",
+    escapeHtml(guide.summary),
+    "",
+    "<b>Guided flow</b>",
+    ...guide.flow.map((item) => `• ${escapeHtml(item)}`),
+    "",
+    "<b>Bot actions</b>",
+    ...guide.actions.map((item) => `• ${escapeHtml(item)}`),
+    "",
+    line("Mini App mirror", guide.miniAppMirror),
+    line("Best for", guide.bestFor),
+    line("Safety", guide.safety),
+  ].join("\n");
+}
+
+async function handleCommandSection(ctx, section) {
+  const capability =
+    section === "MENU_ADMIN"
+      ? CAPABILITIES.SYSTEM_STATUS
+      : section === "MENU_ACCOUNT"
+        ? CAPABILITIES.ACCOUNT_READ
+        : section === "MENU_SUPPORT"
+          ? CAPABILITIES.PUBLIC
+          : CAPABILITIES.SERVICES_USE;
+  if (capability !== CAPABILITIES.PUBLIC && !(await requireCapability(ctx, capability, "command menu"))) return;
+  const access = await getAdminStatus(ctx);
+  rememberScreen(ctx, section);
+  clearPendingPrompts(ctx);
+  await replyHtml(ctx, formatCommandSectionBody(section), buildCommandSectionKeyboard(ctx, section, access));
 }
 
 async function handleServices(ctx) {
   if (!(await requireCapability(ctx, CAPABILITIES.SERVICES_USE, "services"))) return;
   rememberScreen(ctx, "SERVICES");
   clearPendingPrompts(ctx);
+  const access = await getAdminStatus(ctx);
   const lines = [
     "<b>Transferly Services</b>",
     "",
-    "Choose a category. Each service opens a detail card with generation, recent receipts, and balance shortcuts when supported.",
+    "Services, provider lanes, generation tools, receipts, and account workflows now live inside the Mini App.",
+    "",
+    "Open Transferly to continue from the home dashboard.",
   ];
-  await replyHtml(ctx, lines.join("\n"), buildServiceGroupsKeyboard(ctx));
+  await replyHtml(ctx, lines.join("\n"), buildMiniAppHandoffKeyboard(ctx, access));
 }
 
 async function startSearchFlow(ctx, type) {
@@ -2551,17 +3503,17 @@ async function handleServiceGroup(ctx, groupId) {
     return;
   }
 
-  const available = group.slugs
+  const enabled = group.slugs
     .map((slug) => getService(slug))
     .filter(Boolean)
-    .filter((service) => service.status === "available").length;
+    .filter((service) => service.status === "active" || service.status === "sandbox").length;
   const lines = [
     `<b>${escapeHtml(group.title)}</b>`,
     "",
     escapeHtml(group.description),
     "",
     line("Services", String(group.slugs.length)),
-    line("Available", String(available)),
+    line("Enabled", String(enabled)),
   ];
   await replyHtml(ctx, lines.join("\n"), buildServiceGroupKeyboard(ctx, group));
 }
@@ -2576,6 +3528,7 @@ async function handleServiceDetail(ctx, slug) {
     return;
   }
 
+  const commandCenter = getServiceCommandCenter(service);
   const lines = [
     `<b>${escapeHtml(service.title)}</b>`,
     "",
@@ -2584,9 +3537,119 @@ async function handleServiceDetail(ctx, slug) {
     line("Category", service.category),
     line("Status", statusLabel(service.status)),
     line("Badge", service.badge),
-    line("Generator", service.receiptType || "Web workspace"),
+    line("Execution", canGenerateService(service) ? "Labelled sandbox generator" : "Workspace only"),
   ];
+  if (commandCenter) {
+    lines.push(
+      "",
+      `<b>${escapeHtml(commandCenter.title)}</b>`,
+      escapeHtml(commandCenter.summary),
+      "",
+      ...commandCenter.lanes.map((lane) =>
+        `• <b>${escapeHtml(lane.label)}</b> — ${escapeHtml(lane.status === "live" ? "Live" : "Setup")} — ${escapeHtml(lane.summary)}`,
+      ),
+    );
+  }
   await replyHtml(ctx, lines.join("\n"), buildServiceDetailKeyboard(ctx, service));
+}
+
+async function handleServiceLane(ctx, slug, laneId) {
+  if (!(await requireCapability(ctx, CAPABILITIES.SERVICES_USE, "service lane"))) return;
+  const service = getService(slug);
+  const lane = getServiceLane(service, laneId);
+  if (!service || !lane) {
+    await replyHtml(ctx, "Unknown service lane. Open the service catalog again.", buildServiceGroupsKeyboard(ctx));
+    return;
+  }
+
+  rememberScreen(ctx, `SERVICE_LANE:${service.slug}:${lane.id}`);
+  clearPendingPrompts(ctx);
+  const commandCenter = getServiceCommandCenter(service);
+  const liveSummary = await loadServiceCommandCenterSummary(ctx, service);
+  const laneDetail = await loadServiceLaneDetail(ctx, service, lane.id);
+  const liveLane = liveSummary?.command_center?.lanes?.find((entry) => entry.id === lane.id);
+  const liveMetrics = Array.isArray(laneDetail?.lane?.live_metrics)
+    ? laneDetail.lane.live_metrics
+    : Array.isArray(liveLane?.live_metrics)
+      ? liveLane.live_metrics
+      : [];
+  const lines = [
+    `<b>${escapeHtml(service.title)} · ${escapeHtml(lane.label)}</b>`,
+    "",
+    line("Command Center", commandCenter?.title || "Service workspace"),
+    line("Status", lane.status === "live" ? "Live" : "Setup required"),
+    line("Mini App", lane.miniAppSection || "Service workspace"),
+    "",
+    escapeHtml(lane.summary),
+  ];
+  if (liveMetrics.length > 0) {
+    lines.push("", "<b>Live Metrics</b>", ...formatServiceLaneMetricLines(liveMetrics));
+  }
+  if (laneDetail?.action) {
+    lines.push(
+      "",
+      "<b>Action</b>",
+      line("Primary", laneDetail.action.label || "Open lane"),
+      line("Route", laneDetail.action.route || lane.miniAppSection || "Mini App"),
+    );
+  }
+  if (Array.isArray(laneDetail?.readiness) && laneDetail.readiness.length > 0) {
+    lines.push("", "<b>Readiness</b>", ...formatServiceLaneReadinessLines(laneDetail.readiness));
+  }
+  if (laneDetail?.activity) {
+    lines.push("", "<b>Activity</b>", ...formatServiceLaneActivityLines(laneDetail.activity));
+  }
+  if (laneDetail?.support_context?.suggested_handoff) {
+    lines.push("", "<b>Support Handoff</b>", escapeHtml(laneDetail.support_context.suggested_handoff));
+  }
+  lines.push(
+    "",
+    lane.status === "live"
+      ? "Use the lane action below or open the Mini App section to continue from Telegram context."
+      : "This lane is visible for planning and can be activated when backend support is connected.",
+  );
+  await replyHtml(ctx, lines.join("\n"), buildServiceLaneKeyboard(ctx, service, lane));
+}
+
+async function handleServiceLaneAction(ctx, slug, laneId) {
+  if (!(await requireCapability(ctx, CAPABILITIES.SERVICES_USE, "service lane action"))) return;
+  const service = getService(slug);
+  const lane = getServiceLane(service, laneId);
+  if (!service || !lane) {
+    await replyHtml(ctx, "Unknown service lane. Open the service catalog again.", buildServiceGroupsKeyboard(ctx));
+    return;
+  }
+
+  rememberScreen(ctx, `SERVICE_LANE:${service.slug}:${lane.id}`);
+  clearPendingPrompts(ctx);
+
+  let result = null;
+  try {
+    result = await recordServiceLaneActionIntent(ctx, service, lane);
+  } catch (error) {
+    const message =
+      error?.userMessage ||
+      error?.response?.data?.message ||
+      error?.message ||
+      "Lane action could not be recorded.";
+    await replyHtml(ctx, `⚠️ ${escapeHtml(message)}`, buildServiceLaneKeyboard(ctx, service, lane));
+    return;
+  }
+
+  const actionIntent = result?.action_intent;
+  const route = actionIntent?.action?.route || lane.miniAppSection || "Mini App";
+  const lines = [
+    `<b>${escapeHtml(service.title)} · ${escapeHtml(lane.label)}</b>`,
+    "",
+    "<b>Action Recorded</b>",
+    line("Status", actionIntent?.status || "recorded"),
+    line("Intent", actionIntent?.intent || lane.action || "launch"),
+    line("Route", route),
+    "",
+    "Open the Mini App section below to continue with the audited lane context.",
+  ];
+
+  await replyHtml(ctx, lines.join("\n"), buildServiceLaneKeyboard(ctx, service, lane));
 }
 
 async function handleServiceInfo(ctx, slug) {
@@ -2598,12 +3661,15 @@ async function handleServiceInfo(ctx, slug) {
     return;
   }
 
+  const commandCenter = getServiceCommandCenter(service);
   const lines = [
     `<b>${escapeHtml(service.title)}</b>`,
     "",
     escapeHtml(serviceSummary(service)),
     "",
-    "This service is available from the Transferly catalog. A dedicated Telegram generator can be added when the backend exposes a service-specific operation.",
+    commandCenter
+      ? `${commandCenter.title} is available from Telegram with service-specific lanes and Mini App handoffs.`
+      : "This service is available from the Transferly catalog. A dedicated Telegram generator can be added when the backend exposes a service-specific operation.",
   ];
   await replyHtml(ctx, lines.join("\n"), buildServiceDetailKeyboard(ctx, service));
 }
@@ -2751,6 +3817,37 @@ async function handleReferral(ctx) {
   await replyLinkedCommand(ctx, "/referral", "Referral");
 }
 
+async function handleAccount(ctx) {
+  await handleCommandSection(ctx, "MENU_ACCOUNT");
+}
+
+async function handleProviders(ctx) {
+  if (!(await requireCapability(ctx, CAPABILITIES.SERVICES_USE, "provider cockpit"))) return;
+  rememberScreen(ctx, "PROVIDERS");
+  clearPendingPrompts(ctx);
+  const access = await getAdminStatus(ctx);
+  const lines = [
+    "<b>Transferly Providers</b>",
+    "",
+    "Provider dashboards, lane controls, payment records, readiness checks, and recovery actions are handled in the Mini App.",
+    "",
+    "Open Transferly to continue from the home dashboard.",
+  ];
+  await replyHtml(ctx, lines.join("\n"), buildMiniAppHandoffKeyboard(ctx, access));
+}
+
+async function handleProviderCommand(ctx) {
+  const requestedSlug = normalizeProviderSlug(getArgs(ctx)[0]);
+  if (!requestedSlug) return handleProviders(ctx);
+  return handleProviderWorkspace(ctx, requestedSlug);
+}
+
+async function handleProviderShortcut(ctx, slug) {
+  const requestedSlug = normalizeProviderSlug(slug);
+  if (!requestedSlug) return handleProviders(ctx);
+  return handleProviderWorkspace(ctx, requestedSlug);
+}
+
 async function handleReceipt(ctx) {
   if (!(await requireCapability(ctx, CAPABILITIES.SERVICES_USE, "receipt generation"))) return;
   const args = getArgs(ctx);
@@ -2765,14 +3862,131 @@ async function handleReceipt(ctx) {
 
 async function handleInvoices(ctx) {
   if (!(await requireAdmin(ctx, "invoice operations"))) return;
+  const args = getArgs(ctx);
+  if (!args.length) {
+    rememberScreen(ctx, "INVOICE_CENTER");
+    const access = await getAdminStatus(ctx);
+    const lines = [
+      "<b>Transferly Collections</b>",
+      "",
+      "Invoice, collection, receive-money, and provider record workflows now live inside the Mini App.",
+      "",
+      "Open Transferly to continue from the home dashboard.",
+    ];
+    await replyHtml(ctx, lines.join("\n"), buildMiniAppHandoffKeyboard(ctx, access));
+    return;
+  }
   const filters = getListArgs(ctx);
   await handlePayPalInvoices(ctx, { ...filters, page: 1 });
 }
 
 async function handlePayouts(ctx) {
   if (!(await requireAdmin(ctx, "payout operations"))) return;
+  const args = getArgs(ctx);
+  if (!args.length) {
+    rememberScreen(ctx, "PAYOUT_CENTER");
+    const access = await getAdminStatus(ctx);
+    const lines = [
+      "<b>Transferly Sending</b>",
+      "",
+      "Payout, transfer, send-money, approval, and provider remediation workflows now live inside the Mini App.",
+      "",
+      "Open Transferly to continue from the home dashboard.",
+    ];
+    await replyHtml(ctx, lines.join("\n"), buildMiniAppHandoffKeyboard(ctx, access));
+    return;
+  }
   const filters = getListArgs(ctx);
   await handlePayPalPayouts(ctx, { ...filters, page: 1 });
+}
+
+async function handleActivity(ctx) {
+  if (!(await requireAdmin(ctx, "payment activity"))) return;
+  rememberScreen(ctx, "ACTIVITY");
+  const [invoices, payouts, webhooks, issues] = await Promise.all([
+    adminGet("/api/admin/invoices", { pageSize: 1 }).catch(adminReadFallback),
+    adminGet("/api/admin/payouts", { pageSize: 1 }).catch(adminReadFallback),
+    adminGet("/api/admin/webhooks", { limit: 5 }).catch(adminReadFallback),
+    adminGet("/api/admin/payment-issues", { status: "OPEN", limit: 5 }).catch(adminReadFallback),
+  ]);
+  const webhookItems = dataList(webhooks, "events", "items").slice(0, 5);
+  const issueItems = dataList(issues, "issues", "items").slice(0, 3);
+  const unavailable = unavailableSummary([
+    ["invoices", invoices],
+    ["payouts", payouts],
+    ["webhooks", webhooks],
+    ["issues", issues],
+  ]);
+  const lines = [
+    "<b>📊 Transferly Activity</b>",
+    "",
+    line("Invoices", invoices.pagination?.total ?? 0),
+    line("Payouts", payouts.pagination?.total ?? 0),
+    line("Open issues", issueItems.length),
+    unavailable ? line("Unavailable", unavailable) : null,
+    "",
+    "<b>Recent Webhooks</b>",
+    ...(webhookItems.length ? webhookItems.map(formatWebhookEvent) : ["No recent webhook events found."]),
+  ].filter((item) => item !== null);
+  if (issueItems.length) {
+    lines.push("", "<b>Open Issues</b>", ...issueItems.map(formatIssue));
+  }
+  await replyHtml(ctx, lines.join("\n"), buildOpsCommandCenterKeyboard(ctx));
+}
+
+async function handleClients(ctx) {
+  if (!(await requireAdmin(ctx, "client intelligence"))) return;
+  rememberScreen(ctx, "CLIENTS");
+  const payload = await adminGet("/api/admin/users", { limit: 10 }).catch(() => ({ data: [] }));
+  const users = dataList(payload, "users", "items").slice(0, 10);
+  const lines = [
+    "<b>👥 Transferly Clients</b>",
+    "",
+    ...(users.length ? users.map(formatClient) : ["No client records were returned by the API."]),
+  ];
+  await replyHtml(ctx, lines.join("\n"), buildScreenKeyboard(ctx, SCREEN_TYPES.DETAIL));
+}
+
+async function handleRisk(ctx) {
+  if (!(await requireAdmin(ctx, "risk review"))) return;
+  rememberScreen(ctx, "RISK");
+  const payload = await adminGet("/api/admin/risk-flags", { limit: 10 }).catch(adminReadFallback);
+  const flags = dataList(payload, "flags", "items").slice(0, 10);
+  const lines = [
+    "<b>🛡️ Risk Review</b>",
+    "",
+    payload.error ? "Risk flags could not be loaded right now. Use Status or retry from the operations menu." : null,
+    ...(flags.length ? flags.map(formatRiskFlag) : ["No active risk flags found."]),
+  ].filter(Boolean);
+  await replyHtml(ctx, lines.join("\n"), buildOpsCommandCenterKeyboard(ctx));
+}
+
+async function handleSecurity(ctx) {
+  if (!(await requireAdmin(ctx, "security center"))) return;
+  rememberScreen(ctx, "SECURITY");
+  const [health, queues, deadLetters, webhooks] = await Promise.all([
+    httpClient.get(null, `${config.apiUrl}/health`, { timeout: 8000 }).then((response) => response.data).catch(() => ({ status: "unreachable" })),
+    adminGet("/api/admin/queues").catch(adminReadFallback),
+    adminGet("/api/admin/dead-letters", { limit: 5 }).catch(adminReadFallback),
+    adminGet("/api/admin/webhooks", { limit: 3 }).catch(adminReadFallback),
+  ]);
+  const services = health.services || {};
+  const deadLetterItems = dataList(deadLetters, "items").slice(0, 5);
+  const webhookItems = dataList(webhooks, "events", "items").slice(0, 3);
+  const queueSummary = formatQueueSummary(queues);
+  const lines = [
+    "<b>🔐 Security Center</b>",
+    "",
+    line("API", health.status || (health.ok ? "ok" : "unknown")),
+    services.database ? line("Database", services.database.connected ? "connected" : "disconnected") : null,
+    services.redis ? line("Redis", services.redis.connected ? "connected" : "disconnected") : null,
+    queueSummary ? line("Queues", queueSummary) : null,
+    line("Dead letters", deadLetterItems.length),
+    "",
+    "<b>Webhook Watch</b>",
+    ...(webhookItems.length ? webhookItems.map(formatWebhookEvent) : ["No recent webhook events found."]),
+  ].filter((item) => item !== null);
+  await replyHtml(ctx, lines.join("\n"), buildOpsCommandCenterKeyboard(ctx));
 }
 
 async function handleIssues(ctx) {
@@ -2782,14 +3996,15 @@ async function handleIssues(ctx) {
   const payload = await adminGet("/api/admin/payment-issues", {
     status: status && status !== "ALL" ? status : undefined,
     limit: 10,
-  });
+  }).catch(adminReadFallback);
   const items = Array.isArray(payload.data) ? payload.data : [];
   const lines = [
     "<b>Payment Issues</b>",
     "",
+    payload.error ? "Payment issues could not be loaded right now. Use Status or retry from the operations menu." : null,
     ...(items.length ? items.map(formatIssue) : ["No payment issues found."]),
-  ];
-  await replyHtml(ctx, lines.join("\n"), buildScreenKeyboard(ctx, SCREEN_TYPES.DETAIL));
+  ].filter(Boolean);
+  await replyHtml(ctx, lines.join("\n"), buildOpsCommandCenterKeyboard(ctx));
 }
 
 async function handleOrders(ctx) {
@@ -2799,34 +4014,29 @@ async function handleOrders(ctx) {
   const payload = await adminGet("/api/admin/top-up-orders", {
     status: status && status !== "all" ? status : undefined,
     limit: 10,
-  });
+  }).catch(adminReadFallback);
   const items = Array.isArray(payload.data) ? payload.data : [];
   const lines = [
     "<b>Top-up Orders</b>",
     "",
+    payload.error ? "Top-up orders could not be loaded right now. Use Status or retry from the operations menu." : null,
     ...(items.length ? items.map(formatOrder) : ["No top-up orders found."]),
-  ];
-  await replyHtml(ctx, lines.join("\n"), buildScreenKeyboard(ctx, SCREEN_TYPES.DETAIL));
+  ].filter(Boolean);
+  await replyHtml(ctx, lines.join("\n"), buildOpsCommandCenterKeyboard(ctx));
 }
 
 async function handleOps(ctx) {
   if (!(await requireAdmin(ctx, "payment operations summary"))) return;
   rememberScreen(ctx, "OPS");
-  const [invoices, payouts, issues, orders] = await Promise.all([
-    adminGet("/api/admin/invoices", { pageSize: 1 }),
-    adminGet("/api/admin/payouts", { pageSize: 1 }),
-    adminGet("/api/admin/payment-issues", { status: "OPEN", limit: 5 }),
-    adminGet("/api/admin/top-up-orders", { status: "awaiting_confirmation", limit: 5 }),
-  ]);
+  const access = await getAdminStatus(ctx);
   const lines = [
     "<b>Transferly Payment Ops</b>",
     "",
-    line("Invoices", invoices.pagination?.total ?? 0),
-    line("Payouts", payouts.pagination?.total ?? 0),
-    line("Open issues", Array.isArray(issues.data) ? issues.data.length : 0),
-    line("Funding review", Array.isArray(orders.data) ? orders.data.length : 0),
+    "Operational dashboards, payment recovery, reconciliation, audits, and advanced admin workflows now live inside the Mini App.",
+    "",
+    "Use Status here for quick bot/API diagnostics, or open Transferly for the full operations workspace.",
   ];
-  await replyHtml(ctx, lines.join("\n"), buildBackKeyboard(ctx));
+  await replyHtml(ctx, lines.join("\n"), buildMiniAppHandoffKeyboard(ctx, access));
 }
 
 async function handleApprovePayout(ctx) {
@@ -2926,7 +4136,7 @@ async function handleReconcile(ctx) {
       line("Invoices", result.invoices_processed ?? result.invoice_count ?? "submitted"),
       line("Payouts", result.payouts_processed ?? result.payout_count ?? "submitted"),
     ].join("\n"),
-    buildBackKeyboard(ctx),
+    buildOpsCommandCenterKeyboard(ctx),
   );
 }
 
@@ -2951,37 +4161,23 @@ async function handleHealth(ctx) {
 }
 
 async function handleStatus(ctx) {
-  if (!(await requireAdmin(ctx, "deep status"))) return;
   rememberScreen(ctx, "STATUS");
-  const [health, invoices, payouts, issues, orders] = await Promise.all([
-    httpClient.get(null, `${config.apiUrl}/health`, { timeout: 8000 }).then((response) => response.data).catch((error) => ({
-      status: "unreachable",
-      error: error?.userMessage || error?.message || "Health check failed",
-    })),
-    adminGet("/api/admin/invoices", { pageSize: 1 }).catch(() => ({})),
-    adminGet("/api/admin/payouts", { pageSize: 1 }).catch(() => ({})),
-    adminGet("/api/admin/payment-issues", { status: "OPEN", limit: 5 }).catch(() => ({ data: [] })),
-    adminGet("/api/admin/top-up-orders", { status: "awaiting_confirmation", limit: 5 }).catch(() => ({ data: [] })),
-  ]);
-
-  const services = health.services || {};
+  const access = await getAdminStatus(ctx);
+  const readiness = await refreshApiReadiness();
+  const checkedAt = readiness.checkedAt ? new Date(readiness.checkedAt) : new Date();
   const lines = [
-    "<b>Transferly System Status</b>",
+    "<b>Transferly Status</b>",
     "",
-    line("API", health.status || (health.ok ? "ok" : "unknown")),
-    health.error ? line("Health error", health.error) : null,
-    services.database ? line("Database", services.database.connected ? "connected" : "disconnected") : null,
-    services.redis ? line("Redis", services.redis.connected ? "connected" : "disconnected") : null,
+    line("API", readiness.ok ? "operational" : "degraded"),
+    line("Mini App", config.miniAppUrl ? "configured" : "not configured"),
+    line("Bot Updates", config.updates.mode === "webhook" ? "webhook" : "polling"),
+    line("Checked", checkedAt.toLocaleString()),
     "",
-    "<b>Payment Operations</b>",
-    line("Invoices", invoices.pagination?.total ?? 0),
-    line("Payouts", payouts.pagination?.total ?? 0),
-    line("Open issues", Array.isArray(issues.data) ? issues.data.length : 0),
-    line("Funding review", Array.isArray(orders.data) ? orders.data.length : 0),
-    "",
-    line("Checked", new Date().toLocaleString()),
+    readiness.ok
+      ? "Transferly is reachable. Open Transferly to continue."
+      : "We could not confirm API availability right now. Try again shortly or contact support.",
   ].filter((item) => item !== null);
-  await replyHtml(ctx, lines.join("\n"), buildBackKeyboard(ctx));
+  await replyHtml(ctx, lines.join("\n"), buildGatewayKeyboard(ctx, access, { includePolicies: false }));
 }
 
 function parseRedisTarget() {
@@ -3201,13 +4397,17 @@ function recordPaymentAudit(ctx, entry = {}) {
 }
 
 function recordAnalytics(ctx, action, category = "bot", status = "ok", details = {}) {
+  const safeDetails = details && typeof details === "object" ? { ...details } : {};
+  const durationMs = Number.isFinite(Number(safeDetails.durationMs)) ? Number(safeDetails.durationMs) : null;
+  delete safeDetails.durationMs;
   recordBotAnalyticsEvent({
     telegramId: ctx.from?.id || null,
     username: ctx.from?.username || null,
     action,
     category,
     status,
-    details,
+    durationMs,
+    details: Object.keys(safeDetails).length ? safeDetails : null,
   }, () => {});
 }
 
@@ -3369,6 +4569,8 @@ async function handleBotAnalytics(ctx) {
   const stats = await getBotAnalyticsStatsAsync();
   const actionRows = stats.action_totals_24h || [];
   const categoryRows = stats.category_totals_24h || [];
+  const callbackRows = stats.callback_status_totals_24h || [];
+  const slowRows = stats.slow_actions_24h || [];
   await replyHtml(
     ctx,
     [
@@ -3379,12 +4581,23 @@ async function handleBotAnalytics(ctx) {
       line("Failed Actions", stats.failures_24h ?? 0),
       line("Payment Actions", stats.payment_actions_24h ?? 0),
       line("Denied Access", stats.access_denials_24h ?? 0),
+      line("Callback Failures", stats.callback_failures_24h ?? 0),
+      line("Recovered Menus", stats.callback_recoveries_24h ?? 0),
+      line("Unknown Actions", stats.unknown_actions_24h ?? 0),
       "",
       "<b>Top Actions</b>",
       ...(actionRows.length ? actionRows.map((row) => `• ${escapeHtml(row.action)} — ${escapeHtml(row.count)}`) : ["No tracked actions yet."]),
       "",
       "<b>Top Categories</b>",
       ...(categoryRows.length ? categoryRows.map((row) => `• ${escapeHtml(row.category)} — ${escapeHtml(row.count)}`) : ["No tracked categories yet."]),
+      "",
+      "<b>Callback Health</b>",
+      ...(callbackRows.length ? callbackRows.map((row) => `• ${escapeHtml(row.status || "unknown")} — ${escapeHtml(row.count)}`) : ["No callback events yet."]),
+      "",
+      "<b>Slow Actions</b>",
+      ...(slowRows.length
+        ? slowRows.map((row) => `• ${escapeHtml(row.action)} · ${escapeHtml(row.category)} — avg ${escapeHtml(row.avg_duration_ms || 0)}ms, max ${escapeHtml(row.max_duration_ms || 0)}ms`)
+        : ["No timed actions yet."]),
       "",
       line("Generated", stats.generated_at || new Date().toISOString()),
     ].join("\n"),
@@ -3459,7 +4672,7 @@ async function runSubscriptionAlertSweep() {
       await recordSubscriptionAlertAsync(user.telegram_id, user.alert_threshold, user.subscription_expires_at);
       sent += 1;
     } catch (error) {
-      console.warn("Subscription alert delivery failed", {
+      logger.warn("Subscription alert delivery failed", {
         telegramId: user.telegram_id,
         threshold: user.alert_threshold,
         message: error?.message || String(error),
@@ -3467,7 +4680,7 @@ async function runSubscriptionAlertSweep() {
     }
   }
   if (sent) {
-    console.log(`Transferly subscription alert sweep sent ${sent} alert(s).`);
+    logger.info("Transferly subscription alert sweep completed", { sent });
   }
 }
 
@@ -4167,14 +5380,19 @@ async function handlePendingSearchText(ctx, text) {
 
 async function handleStoredNavigationAction(ctx, action) {
   if (!action || action === "MENU") return handleMenu(ctx);
-  if (action === "SERVICES") return handleServices(ctx);
   if (action === "HELP") return handleHelp(ctx);
+  if (action === "SUPPORT") return handleSupport(ctx);
+  if (action.startsWith("SUPPORT_")) return handleSupport(ctx, action);
+  if (action === "TERMS") return handleTerms(ctx);
+  if (action === "PRIVACY") return handlePrivacy(ctx);
+  if (isMiniAppDelegatedAction(action)) return handleMiniAppDelegatedAction(ctx, action);
+  if (COMMAND_SECTION_ACTIONS.has(action)) return handleCommandSection(ctx, action);
   if (action === "PROFILE") return handleProfile(ctx);
   if (action === "WHOAMI") return handleWhoami(ctx);
   if (action === "BALANCE") return handleBalance(ctx);
   if (action === "RECEIPTS") return handleReceipts(ctx);
   if (action === "REFERRAL") return handleReferral(ctx);
-  if (action === "HEALTH") return handleHealth(ctx);
+  if (action === "HEALTH") return handleStatus(ctx);
   if (action === "STATUS") return handleStatus(ctx);
   if (action === "BOT_OPS") return handleBotOps(ctx);
   if (action === "BOT_ANALYTICS") return handleBotAnalytics(ctx);
@@ -4185,17 +5403,47 @@ async function handleStoredNavigationAction(ctx, action) {
   if (action === "USERS_AUDIT") return handleUsersAudit(ctx);
   if (action === "USERS_EXPIRING") return handleExpiringUsers(ctx);
   if (action === "OPS") return handleOps(ctx);
+  if (action === "ACTIVITY") return handleActivity(ctx);
+  if (action === "CLIENTS") return handleClients(ctx);
+  if (action === "RISK") return handleRisk(ctx);
+  if (action === "SECURITY") return handleSecurity(ctx);
   if (action === "ISSUES") return handleIssues(ctx);
   if (action === "ORDERS") return handleOrders(ctx);
-  if (action === "INVOICES" || action === "PP:INV") return handlePayPalInvoices(ctx);
-  if (action === "PAYOUTS" || action === "PP:PO") return handlePayPalPayouts(ctx);
+  if (action === "RECONCILE") return handleReconcile(ctx);
+  if (action === "INVOICES") return handleInvoices(ctx);
+  if (action === "PP:INV") return handlePayPalInvoices(ctx);
+  if (action === "PAYOUTS") return handlePayouts(ctx);
+  if (action === "PP:PO") return handlePayPalPayouts(ctx);
   if (action === "PP:HOME") return handlePayPalWorkspace(ctx);
+  if (action.startsWith("PROVIDER_INV:")) {
+    return handlePayPalInvoices(ctx, { provider: action.slice("PROVIDER_INV:".length), page: 1 });
+  }
+  if (action.startsWith("PROVIDER_PO:")) {
+    return handleProviderPayouts(ctx, action.slice("PROVIDER_PO:".length));
+  }
+  if (action.startsWith("PROVIDER_BAL:")) {
+    return handleProviderBalance(ctx, action.slice("PROVIDER_BAL:".length));
+  }
+  if (action.startsWith("PROVIDER_WEBHOOKS:")) {
+    return handleProviderWebhooks(ctx, action.slice("PROVIDER_WEBHOOKS:".length));
+  }
+  if (action.startsWith("PROVIDER_ISSUES:")) {
+    return handleProviderIssues(ctx, action.slice("PROVIDER_ISSUES:".length));
+  }
 
   if (action.startsWith("GROUP:")) {
     return handleServiceGroup(ctx, action.slice("GROUP:".length));
   }
   if (action.startsWith("SERVICE:")) {
     return handleServiceDetail(ctx, action.slice("SERVICE:".length));
+  }
+  if (action.startsWith("SERVICE_ACTION:")) {
+    const [, slug, laneId] = action.split(":");
+    return handleServiceLaneAction(ctx, slug, laneId);
+  }
+  if (action.startsWith("SERVICE_LANE:")) {
+    const [, slug, laneId] = action.split(":");
+    return handleServiceLane(ctx, slug, laneId);
   }
   if (action.startsWith("PROVIDER:")) {
     return handleProviderWorkspace(ctx, action.slice("PROVIDER:".length));
@@ -4232,6 +5480,9 @@ async function recoverCallback(ctx, validation = {}) {
   clearPendingPrompts(ctx);
   const access = await getAdminStatus(ctx);
   const action = validation.action || "";
+  recordAnalytics(ctx, action || "callback_recovery", "callback_recovery", validation.status || "recovered", {
+    reason: validation.reason || validation.status || "callback_recovery",
+  });
   const reason = validation.status === "stale"
     ? "That button belongs to an older bot session."
     : validation.status === "invalid"
@@ -4240,29 +5491,178 @@ async function recoverCallback(ctx, validation = {}) {
   await replyHtml(
     ctx,
     [
-      "<b>Session Recovered</b>",
+      "<b>Fresh Navigation</b>",
       "",
       reason,
-      "I opened the closest fresh workspace so you can continue safely.",
+      "Use the Mini App for dashboard work, or continue with the simple bot actions below.",
     ].join("\n"),
     buildCallbackRecoveryKeyboard(ctx, action, access),
   );
+}
+
+function classifyBotError(error) {
+  if (error?.userMessage) {
+    return {
+      code: "user_message",
+      severity: "warn",
+      status: Number(error?.response?.status) || null,
+      userMessage: error.userMessage,
+    };
+  }
+
+  const status = Number(error?.response?.status) || null;
+  const networkCode = error?.code || error?.cause?.code || null;
+
+  if (status === 401 || status === 403) {
+    return {
+      code: "access_verification_failed",
+      severity: "warn",
+      status,
+      userMessage: "Transferly could not verify access for that request. Use /support if you need help.",
+    };
+  }
+  if (status === 404) {
+    return {
+      code: "resource_not_found",
+      severity: "warn",
+      status,
+      userMessage: "That Transferly item is no longer available from this bot screen. Open Transferly to continue.",
+    };
+  }
+  if (status === 409) {
+    return {
+      code: "state_conflict",
+      severity: "warn",
+      status,
+      userMessage: "That action is no longer current. Open Transferly for the latest status.",
+    };
+  }
+  if (status === 429) {
+    return {
+      code: "rate_limited",
+      severity: "warn",
+      status,
+      userMessage: "Transferly is receiving too many requests. Please wait a moment and try again.",
+    };
+  }
+  if (status >= 500) {
+    return {
+      code: "api_unavailable",
+      severity: "error",
+      status,
+      userMessage: "Transferly is temporarily unavailable. Try again shortly or use Help for support.",
+    };
+  }
+  if (["ECONNABORTED", "ETIMEDOUT", "ECONNRESET", "ENOTFOUND", "ECONNREFUSED"].includes(networkCode)) {
+    return {
+      code: "api_network_error",
+      severity: "error",
+      status,
+      userMessage: "Transferly could not be reached. Try again shortly or use Help for support.",
+    };
+  }
+
+  return {
+    code: "bot_error",
+    severity: "error",
+    status,
+    userMessage: "Transferly request failed. Please try again or use Help for support.",
+  };
+}
+
+function buildErrorRecoveryKeyboard(ctx) {
+  const keyboard = new InlineKeyboard();
+  addPrimaryMiniAppButton(keyboard);
+  keyboard
+    .row()
+    .text(BOT_NAV_LABELS.help, buildCallbackData(ctx, "HELP"))
+    .text(BOT_NAV_LABELS.support, buildCallbackData(ctx, "SUPPORT"))
+    .row()
+    .text(BOT_NAV_LABELS.mainMenu, buildCallbackData(ctx, "MENU"));
+  return keyboard;
+}
+
+function getUpdateRateKey(ctx, label) {
+  const userId = ctx.from?.id || ctx.chat?.id || "anonymous";
+  const command = ctx.message?.text?.startsWith("/")
+    ? ctx.message.text.split(/\s+/)[0].slice(1).toLowerCase()
+    : label;
+  return `${userId}:${command || label}`;
+}
+
+function getRateLimitOptions(ctx, label) {
+  if (label === "callback") {
+    return { windowMs: 30 * 1000, max: 24 };
+  }
+  if (ctx.message?.text?.startsWith("/")) {
+    return { windowMs: 60 * 1000, max: 18 };
+  }
+  return { windowMs: 60 * 1000, max: 30 };
+}
+
+async function enforceRateLimit(ctx, label) {
+  const result = updateRateLimiter.check(getUpdateRateKey(ctx, label), getRateLimitOptions(ctx, label));
+  if (result.allowed) return true;
+  const retryAfterSeconds = Math.max(1, Math.ceil(result.retryAfterMs / 1000));
+  logger.warn("Bot rate limit blocked update", getTelegramLogContext(ctx, {
+    action: label,
+    retryAfterSeconds,
+  }));
+  recordBotAnalyticsEvent({
+    telegramId: ctx.from?.id || null,
+    username: ctx.from?.username || null,
+    action: label,
+    category: "rate_limit",
+    status: "blocked",
+    details: { retryAfterSeconds },
+  }, () => {});
+  if (ctx.callbackQuery) {
+    await ctx.answerCallbackQuery({
+      text: `Please wait ${retryAfterSeconds}s, then try again.`,
+      show_alert: false,
+    }).catch(() => {});
+  }
+  await replyHtml(
+    ctx,
+    [
+      "<b>One moment</b>",
+      "",
+      `Transferly received several bot actions quickly. Please wait ${retryAfterSeconds}s, then try again.`,
+      "",
+      "The Mini App remains the best place for longer dashboard workflows.",
+    ].join("\n"),
+    buildBackKeyboard(ctx),
+  );
+  return false;
 }
 
 function wrap(handler, label) {
   return async (ctx) => {
     ensureSession(ctx);
     const start = Date.now();
+    let command = null;
     try {
+      if (!(await enforceRateLimit(ctx, label))) {
+        return;
+      }
       await clearTriggerMessage(ctx);
       if (ctx.message?.text?.startsWith("/")) {
-        const command = ctx.message.text.split(/\s+/)[0].slice(1).toLowerCase();
+        command = ctx.message.text.split(/\s+/)[0].slice(1).toLowerCase();
         const requiredCapability = getCommandCapability(command || label);
         if (!(await requireCapability(ctx, requiredCapability, `/${command || label}`))) {
           return;
         }
       }
+      logger.info("Bot command/action started", getTelegramLogContext(ctx, {
+        action: label,
+        command,
+      }));
       await handler(ctx);
+      logger.info("Bot command/action completed", getTelegramLogContext(ctx, {
+        action: label,
+        command,
+        durationMs: Date.now() - start,
+      }));
       recordBotAnalyticsEvent({
         telegramId: ctx.from?.id || null,
         username: ctx.from?.username || null,
@@ -4272,6 +5672,7 @@ function wrap(handler, label) {
         durationMs: Date.now() - start,
       }, () => {});
     } catch (error) {
+      const classified = classifyBotError(error);
       recordBotAnalyticsEvent({
         telegramId: ctx.from?.id || null,
         username: ctx.from?.username || null,
@@ -4279,18 +5680,68 @@ function wrap(handler, label) {
         category: "command",
         status: "error",
         durationMs: Date.now() - start,
-        details: { message: error?.message || String(error) },
+        details: {
+          code: classified.code,
+          status: classified.status,
+          requestId: error?.apiContext?.requestId,
+        },
       }, () => {});
-      console.error(`${label} failed`, {
+      const logPayload = {
+        ...getTelegramLogContext(ctx),
+        command: label,
+        code: classified.code,
         message: error?.message,
-        status: error?.response?.status,
+        status: classified.status,
         requestId: error?.apiContext?.requestId,
-      });
-      const message = error?.userMessage || error?.response?.data?.message || "Transferly request failed. Please try again.";
-      await replyHtml(ctx, `⚠️ ${escapeHtml(message)}`, buildBackKeyboard(ctx));
+      };
+      if (classified.severity === "warn") {
+        logger.warn(`${label} failed`, logPayload);
+      } else {
+        logger.error(`${label} failed`, logPayload);
+      }
+      await replyHtml(ctx, `⚠️ ${escapeHtml(classified.userMessage)}`, buildErrorRecoveryKeyboard(ctx));
     }
   };
 }
+
+function getUpdateType(ctx) {
+  const update = ctx.update || {};
+  return Object.keys(update).find((key) => key !== "update_id") || "unknown";
+}
+
+function getCommandNameFromText(text) {
+  if (!text || !String(text).trim().startsWith("/")) return null;
+  return String(text).trim().split(/\s+/)[0].slice(1).split("@")[0].toLowerCase().slice(0, 64);
+}
+
+function getCallbackActionLabel(rawData) {
+  const value = String(rawData || "");
+  if (!value) return null;
+  if (value.startsWith("cb|")) return value.split("|")[1] || "signed_callback";
+  if (value.startsWith("REF:")) return "callback_ref";
+  return value.split("|")[0].split(":").slice(0, 2).join(":").slice(0, 80) || "callback";
+}
+
+bot.use(async (ctx, next) => {
+  logger.info("Telegram update received", getTelegramLogContext(ctx, {
+    updateId: ctx.update?.update_id ?? null,
+    updateType: getUpdateType(ctx),
+    command: getCommandNameFromText(ctx.message?.text),
+    callbackAction: getCallbackActionLabel(ctx.callbackQuery?.data),
+  }));
+  return next();
+});
+
+bot.use(async (ctx, next) => {
+  const result = updateDeduper.check(ctx.update?.update_id);
+  if (result.duplicate) {
+    logger.warn("Duplicate Telegram update ignored", getTelegramLogContext(ctx, {
+      updateId: result.updateId,
+    }));
+    return;
+  }
+  return next();
+});
 
 bot.use(session({
   initial: initialSessionState,
@@ -4309,44 +5760,18 @@ registerCommands(bot, {
   wrap,
   handlers: {
     handleStart,
-    handleMenu,
-    handleServices,
     handleHelp,
-    handleWhoami,
-    handleProfile,
-    handleBalance,
-    handleReceipts,
-    handleReceipt,
-    handleReferral,
-    handleInvoices,
-    handlePayouts,
-    handleIssues,
-    handleOrders,
-    handleOps,
-    handleApprovePayout,
-    handleRejectPayout,
-    handleCancelUnclaimed,
-    handleReleaseInvoice,
-    handleRefreshInvoice,
-    handleRefreshPayout,
-    handleReconcile,
-    handleHealth,
+    handleSupport,
+    handleTerms,
+    handlePrivacy,
     handleStatus,
-    handleBotOps,
-    handleBotAnalytics,
-    handleSubscriptionAlerts,
-    handlePaymentAudit,
-    handleAlertToggle,
-    handleAlertPreset,
-    handleExport,
-    handleUsers,
-    handleCancel,
   },
 });
 
 registerCallbackRouter(bot, {
   wrap,
   validateCallback,
+  isMiniAppDelegatedAction,
   getActionCapability,
   requireCapability,
   requireAdmin,
@@ -4355,66 +5780,32 @@ registerCallbackRouter(bot, {
   prepareNavigationAction,
   replyHtml,
   deleteOrDisableMessage,
-  buildMainMenuKeyboard,
   buildBackKeyboard,
-  getAdminStatus,
   handlers: {
-    getService,
     handleBack,
     handleCancel,
     handleMenu,
-    handleServices,
+    handleMiniAppDelegatedAction,
     handleHelp,
-    handleProfile,
+    handleSupport,
+    handleTerms,
+    handlePrivacy,
     handleWhoami,
-    handleBalance,
-    handleReceipts,
-    handleReferral,
-    handleHealth,
     handleStatus,
-    handleBotOps,
-    handleBotAnalytics,
-    handleSubscriptionAlerts,
-    handlePaymentAudit,
-    handleAlertToggle,
-    handleAlertPreset,
-    handleExport,
-    handleServiceGroup,
-    handleServiceDetail,
-    handleProviderWorkspace,
-    handleProviderLane,
-    runServiceReceipt,
-    handleCustomServiceStart,
-    handleServiceHistory,
-    handleServiceInfo,
-    startSearchFlow,
-    handlePayPalWorkspace,
-    startServiceComposer,
-    handleComposerAction,
-    handlePayPalInvoices,
-    handlePayPalPayouts,
-    handlePayPalInvoiceDetail,
-    handlePayPalPayoutDetail,
-    handlePayPalInvoiceAction,
-    handlePayPalPayoutAction,
-    handleIssues,
-    handleOrders,
-    handleOps,
-    handleReconcile,
-    handleUsers,
-    sendUsersList,
-    handleUsersAudit,
-    handleExpiringUsers,
-    handleUserDetail,
-    setPendingUserAction,
-    setPendingUserDetailAction,
-    setPendingUserSubscriptionDays,
-    completePendingUserAction,
-    handleCustomSubscriptionDays,
-    handleChangeSubscriptionDays,
   },
 });
 bot.on("message:text", wrap(async (ctx) => {
+  if (ctx.session?.flow?.name && ctx.session.flow.name !== "support") {
+    const access = await getAdminStatus(ctx);
+    clearPendingPrompts(ctx);
+    await replyHtml(
+      ctx,
+      "That older bot workflow has moved into the Mini App. Open Transferly to continue from the dashboard.",
+      buildMiniAppHandoffKeyboard(ctx, access),
+    );
+    return;
+  }
+
   if (await handlePendingSearchText(ctx, ctx.message.text)) {
     return;
   }
@@ -4436,43 +5827,317 @@ bot.on("message:text", wrap(async (ctx) => {
   }
 
   if (ctx.message.text.startsWith("/")) {
-    await replyHtml(ctx, "Unsupported Transferly command. Use /help for the available command list.", buildBackKeyboard(ctx));
+    await replyHtml(ctx, "That command is not available here. Use /start to open Transferly, /help for guidance, or /support for help.", buildBackKeyboard(ctx));
     return;
   }
 
-  await replyHtml(ctx, "Use /menu for Transferly actions or /help for command examples.", buildBackKeyboard(ctx));
+  if (ctx.session?.flow?.name === "support") {
+    const access = await getAdminStatus(ctx);
+    await replyHtml(
+      ctx,
+      "I couldn’t match that support message. Choose a category below or use /start to exit.",
+      buildSupportKeyboard(ctx, access),
+    );
+    return;
+  }
+
+  await replyHtml(
+    ctx,
+    "Use /start to open Transferly, /support for support, or /help for commands.",
+    buildStartKeyboard(ctx, await getAdminStatus(ctx)),
+  );
 }, "text"));
 
 bot.catch((error) => {
-  console.error("Bot update failed", {
-    updateId: error.ctx?.update?.update_id,
+  const classified = classifyBotError(error.error);
+  logger.error("Bot update failed", {
+    ...getTelegramLogContext(error.ctx || {}),
+    code: classified.code,
+    status: classified.status,
     message: error.error?.message || String(error.error),
   });
 });
 
-async function validateApiConnectivity() {
+const apiReadiness = {
+  ok: false,
+  status: "unchecked",
+  checkedAt: null,
+  message: "not checked",
+};
+const telegramMenuButtonState = {
+  status: config.runtime.configureMenuButton ? "pending" : "disabled",
+  checkedAt: null,
+  message: config.runtime.configureMenuButton ? "not configured yet" : "disabled by BOT_CONFIGURE_MENU_BUTTON",
+};
+
+function readinessPayload() {
+  return {
+    ok: apiReadiness.ok,
+    service: "transferly-bot",
+    api: apiReadiness,
+  };
+}
+
+function runtimeStatusPayload() {
+  return buildRuntimeStatus(config, {
+    apiReadiness,
+    menuButton: telegramMenuButtonState,
+    primaryMiniAppSection: BOT_UX_BOUNDARY.primaryMiniAppSection,
+    updateDedupe: updateDeduper.stats(),
+  });
+}
+
+async function refreshApiReadiness() {
   const healthUrl = new URL("/health", config.apiUrl).toString();
-  const response = await httpClient.get(null, healthUrl, { timeout: 5000 });
-  if (!response.data || (!response.data.ok && response.data.status && response.data.status !== "healthy")) {
-    throw new Error(`Transferly API healthcheck returned an unexpected payload.`);
+  try {
+    const response = await httpClient.get(null, healthUrl, {
+      timeout: 5000,
+      retry: { retries: 0 },
+    });
+    const ok = Boolean(response.data?.ok || response.data?.status === "healthy");
+    apiReadiness.ok = ok;
+    apiReadiness.status = ok ? "ready" : "unhealthy";
+    apiReadiness.checkedAt = new Date().toISOString();
+    apiReadiness.message = ok ? "api reachable" : "unexpected health payload";
+    const logPayload = { url: healthUrl, status: apiReadiness.status };
+    if (ok) {
+      logger.info("Transferly API readiness check passed", logPayload);
+    } else {
+      logger.warn("Transferly API readiness check failed", logPayload);
+    }
+  } catch (error) {
+    apiReadiness.ok = false;
+    apiReadiness.status = "unreachable";
+    apiReadiness.checkedAt = new Date().toISOString();
+    apiReadiness.message = error?.code || error?.message || "api unreachable";
+    logger.warn("Transferly API readiness check failed", {
+      url: healthUrl,
+      message: apiReadiness.message,
+    });
   }
-  console.log(`Transferly API reachable (${healthUrl})`);
+  return { ...apiReadiness };
+}
+
+async function validateApiConnectivity() {
+  const readiness = await refreshApiReadiness();
+  if (!readiness.ok && config.runtime.requireApiReady) {
+    throw new Error(`Transferly API readiness required but ${readiness.status}.`);
+  }
+  return readiness;
+}
+
+async function configureTelegramMenuButton() {
+  if (!config.runtime.configureMenuButton || !config.miniAppUrl) {
+    telegramMenuButtonState.status = config.runtime.configureMenuButton ? "skipped" : "disabled";
+    telegramMenuButtonState.checkedAt = new Date().toISOString();
+    telegramMenuButtonState.message = config.miniAppUrl
+      ? "disabled by configuration"
+      : "MINI_APP_URL is not configured";
+    return;
+  }
+  try {
+    await bot.api.setChatMenuButton({
+      menu_button: {
+        type: "web_app",
+        text: "Open Transferly",
+        web_app: { url: buildMiniAppUrl(BOT_UX_BOUNDARY.primaryMiniAppSection) },
+      },
+    });
+    telegramMenuButtonState.status = "configured";
+    telegramMenuButtonState.checkedAt = new Date().toISOString();
+    telegramMenuButtonState.message = "Telegram menu button opens Mini App dashboard";
+    logger.info("Transferly Telegram menu button configured", {
+      section: BOT_UX_BOUNDARY.primaryMiniAppSection,
+    });
+  } catch (error) {
+    telegramMenuButtonState.status = "failed";
+    telegramMenuButtonState.checkedAt = new Date().toISOString();
+    telegramMenuButtonState.message = error?.message || "setChatMenuButton failed";
+    throw error;
+  }
+}
+
+let alertTimer = null;
+let sessionCleanupTimer = null;
+let webhookServer = null;
+
+function runSessionCleanup() {
+  cleanupExpiredBotSessions(336, function onCleanup(error) {
+    if (error) {
+      logger.warn("Bot session cleanup failed", { message: error.message });
+      return;
+    }
+    logger.debug("Bot session cleanup completed", { deleted: this?.changes || 0 });
+  });
+}
+
+function startBackgroundJobs() {
+  if (config.runtime.runSubscriptionAlertSweep) {
+    runSubscriptionAlertSweep().catch((error) => logger.warn("Initial subscription alert sweep failed", { error }));
+    alertTimer = setInterval(() => {
+      runSubscriptionAlertSweep().catch((error) => logger.warn("Subscription alert sweep failed", { error }));
+    }, 6 * 60 * 60 * 1000);
+    alertTimer.unref?.();
+  } else {
+    logger.info("Bot subscription alert sweep disabled");
+  }
+
+  if (config.runtime.runSessionCleanup) {
+    runSessionCleanup();
+    sessionCleanupTimer = setInterval(runSessionCleanup, 12 * 60 * 60 * 1000);
+    sessionCleanupTimer.unref?.();
+  } else {
+    logger.info("Bot session cleanup disabled");
+  }
+}
+
+function stopBackgroundJobs() {
+  if (alertTimer) {
+    clearInterval(alertTimer);
+    alertTimer = null;
+  }
+  if (sessionCleanupTimer) {
+    clearInterval(sessionCleanupTimer);
+    sessionCleanupTimer = null;
+  }
+}
+
+function registerPollingShutdownHandlers() {
+  let stopping = false;
+  const stop = async (signal) => {
+    if (stopping) return;
+    stopping = true;
+    logger.info("Transferly bot stopping", { signal, mode: "polling" });
+    stopBackgroundJobs();
+    try {
+      if (bot.isRunning()) {
+        await bot.stop();
+      }
+      process.exit(0);
+    } catch (error) {
+      logger.error("Transferly bot shutdown failed", { error });
+      process.exit(1);
+    }
+  };
+  process.once("SIGINT", () => stop("SIGINT"));
+  process.once("SIGTERM", () => stop("SIGTERM"));
+}
+
+function registerWebhookShutdownHandlers(server) {
+  let stopping = false;
+  const stop = (signal) => {
+    if (stopping) return;
+    stopping = true;
+    logger.info("Transferly webhook server stopping", { signal, mode: "webhook" });
+    stopBackgroundJobs();
+    server.close((error) => {
+      if (error) {
+        logger.error("Transferly webhook server shutdown failed", { error });
+        process.exit(1);
+        return;
+      }
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 10000).unref?.();
+  };
+  process.once("SIGINT", () => stop("SIGINT"));
+  process.once("SIGTERM", () => stop("SIGTERM"));
+}
+
+async function startPollingRuntime() {
+  registerPollingShutdownHandlers();
+  logger.info("Transferly bot polling started");
+  await bot.start();
+}
+
+async function startWebhookRuntime() {
+  if (!config.updates.webhookUrl) {
+    throw new Error("BOT_WEBHOOK_URL is required when BOT_UPDATE_MODE=webhook.");
+  }
+
+  const webhookPath = config.updates.webhookPath.startsWith("/")
+    ? config.updates.webhookPath
+    : `/${config.updates.webhookPath}`;
+  const handleUpdate = webhookCallback(bot, "http", {
+    secretToken: config.updates.webhookSecret || undefined,
+    timeoutMilliseconds: 10000,
+  });
+
+  webhookServer = http.createServer(async (req, res) => {
+    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, service: "transferly-bot" }));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/readyz") {
+      const readiness = await refreshApiReadiness();
+      res.writeHead(readiness.ok ? 200 : 503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(readinessPayload()));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/runtimez") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(runtimeStatusPayload()));
+      return;
+    }
+    if (req.method !== "POST" || url.pathname !== webhookPath) {
+      res.writeHead(404).end();
+      return;
+    }
+    try {
+      await handleUpdate(req, res);
+    } catch (error) {
+      logger.error("Telegram webhook update failed", { error });
+      if (!res.headersSent) {
+        res.writeHead(500).end();
+      } else {
+        res.end();
+      }
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    webhookServer.once("error", reject);
+    webhookServer.listen(config.updates.port, resolve);
+  });
+
+  const webhookOptions = {
+    ...(config.updates.webhookSecret ? { secret_token: config.updates.webhookSecret } : {}),
+    allowed_updates: config.updates.allowedUpdates,
+    drop_pending_updates: config.updates.dropPendingUpdates,
+  };
+  await bot.api.setWebhook(config.updates.webhookUrl, webhookOptions);
+  const webhookInfo = await bot.api.getWebhookInfo().catch((error) => {
+    logger.warn("Transferly bot webhook info unavailable", { message: error?.message });
+    return null;
+  });
+  registerWebhookShutdownHandlers(webhookServer);
+  logger.info("Transferly bot webhook runtime started", {
+    port: config.updates.port,
+    path: webhookPath,
+    webhookUrl: config.updates.webhookUrl,
+    allowedUpdates: config.updates.allowedUpdates,
+    dropPendingUpdates: config.updates.dropPendingUpdates,
+    pendingUpdateCount: webhookInfo?.pending_update_count ?? null,
+    lastErrorDate: webhookInfo?.last_error_date || null,
+  });
 }
 
 async function bootstrap() {
   try {
     await validateApiConnectivity();
     await bot.api.setMyCommands(TELEGRAM_COMMANDS);
-    console.log("Transferly bot commands registered");
-    runSubscriptionAlertSweep().catch((error) => console.warn("Initial subscription alert sweep failed", error?.message || error));
-    const alertTimer = setInterval(() => {
-      runSubscriptionAlertSweep().catch((error) => console.warn("Subscription alert sweep failed", error?.message || error));
-    }, 6 * 60 * 60 * 1000);
-    alertTimer.unref?.();
-    await bot.start();
-    console.log("Transferly bot is polling for updates");
+    logger.info("Transferly bot commands registered");
+    await configureTelegramMenuButton();
+    startBackgroundJobs();
+    if (config.updates.mode === "webhook") {
+      await startWebhookRuntime();
+      return;
+    }
+    await startPollingRuntime();
   } catch (error) {
-    console.error("Failed to start Transferly bot:", error?.message || error);
+    logger.error("Failed to start Transferly bot", { error });
     process.exit(1);
   }
 }
@@ -4483,11 +6148,29 @@ if (require.main === module) {
 
 module.exports = {
   SCREEN_TYPES,
+  BOT_UX_BOUNDARY,
+  PRIMARY_MINI_APP_LABEL,
   TELEGRAM_COMMANDS,
+  MINI_APP_SECTIONS,
   buildScreenKeyboard,
   buildStartKeyboard,
   buildMainMenuKeyboard,
+  buildCommandHubKeyboard,
+  buildSupportKeyboard,
+  buildCommandSectionKeyboard,
+  formatCommandSectionBody,
+  buildProvidersKeyboard,
+  buildInvoiceCenterKeyboard,
+  buildPayoutCenterKeyboard,
+  buildOpsCommandCenterKeyboard,
   buildBackKeyboard,
+  buildMiniAppButton,
+  buildMiniAppUrl,
+  isMiniAppDelegatedAction,
+  classifyBotError,
+  runtimeStatusPayload,
+  readinessPayload,
+  updateDeduper,
   buildUsersKeyboard,
   buildUsersListKeyboard,
   buildUserDetailKeyboard,
@@ -4500,7 +6183,9 @@ module.exports = {
   buildServiceGroupsKeyboard,
   buildServiceGroupKeyboard,
   buildServiceDetailKeyboard,
+  buildServiceLaneKeyboard,
   buildServiceSearchResultsKeyboard,
+  buildProviderWorkspaceKeyboard,
   buildPayPalWorkspaceKeyboard,
   buildPayPalListKeyboard,
   buildInvoiceDetailKeyboard,

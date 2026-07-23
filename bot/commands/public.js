@@ -1,9 +1,10 @@
 function registerPublicCommands(bot, { wrap, handlers }) {
   bot.command("start", wrap(handlers.handleStart, "start"));
-  bot.command("menu", wrap(handlers.handleMenu, "menu"));
   bot.command("help", wrap(handlers.handleHelp, "help"));
-  bot.command("whoami", wrap(handlers.handleWhoami, "whoami"));
-  bot.command("cancel", wrap(handlers.handleCancel, "cancel"));
+  bot.command("support", wrap(handlers.handleSupport, "support"));
+  bot.command("status", wrap(handlers.handleStatus, "status"));
+  bot.command("terms", wrap(handlers.handleTerms, "terms"));
+  bot.command("privacy", wrap(handlers.handlePrivacy, "privacy"));
 }
 
 module.exports = {

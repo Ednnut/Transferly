@@ -9,10 +9,13 @@ const redisConnection = new IORedis(config.REDIS_URL, {
 
 const queueNames = Object.freeze({
   invoiceSend: 'invoice-send',
+  orderProcess: 'order-process',
   payoutProcess: 'payout-process',
   webhookProcess: 'webhook-process',
   payoutRetry: 'payout-retry',
   reconciliation: 'payment-reconciliation',
+  assetCleanup: 'asset-cleanup',
+  pointReservationExpiry: 'point-reservation-expiry',
   deadLetter: 'dead-letter'
 });
 
@@ -20,13 +23,19 @@ const defaultJobOptions = {
   attempts: 5,
   backoff: {
     type: 'exponential',
-    delay: 1000
+    delay: 1000,
+    jitter: 0.5
   },
   removeOnComplete: 1000,
   removeOnFail: 5000
 };
 
 const invoiceSendQueue = new Queue(queueNames.invoiceSend, {
+  connection: redisConnection,
+  defaultJobOptions
+});
+
+const orderProcessQueue = new Queue(queueNames.orderProcess, {
   connection: redisConnection,
   defaultJobOptions
 });
@@ -51,6 +60,16 @@ const reconciliationQueue = new Queue(queueNames.reconciliation, {
   defaultJobOptions
 });
 
+const assetCleanupQueue = new Queue(queueNames.assetCleanup, {
+  connection: redisConnection,
+  defaultJobOptions
+});
+
+const pointReservationExpiryQueue = new Queue(queueNames.pointReservationExpiry, {
+  connection: redisConnection,
+  defaultJobOptions
+});
+
 const deadLetterQueue = new Queue(queueNames.deadLetter, {
   connection: redisConnection,
   defaultJobOptions: {
@@ -60,6 +79,10 @@ const deadLetterQueue = new Queue(queueNames.deadLetter, {
 });
 
 const invoiceSendQueueEvents = new QueueEvents(queueNames.invoiceSend, {
+  connection: redisConnection
+});
+
+const orderProcessQueueEvents = new QueueEvents(queueNames.orderProcess, {
   connection: redisConnection
 });
 
@@ -74,12 +97,16 @@ const reconciliationQueueEvents = new QueueEvents(queueNames.reconciliation, {
 module.exports = {
   queueNames,
   invoiceSendQueue,
+  orderProcessQueue,
   payoutProcessQueue,
   webhookProcessQueue,
   payoutRetryQueue,
   reconciliationQueue,
+  assetCleanupQueue,
+  pointReservationExpiryQueue,
   deadLetterQueue,
   invoiceSendQueueEvents,
+  orderProcessQueueEvents,
   payoutProcessQueueEvents,
   reconciliationQueueEvents,
   redisConnection

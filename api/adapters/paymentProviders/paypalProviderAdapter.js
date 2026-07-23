@@ -12,8 +12,14 @@ const paypalProviderAdapter = createProviderAdapter({
     payouts: true,
     balance: false,
     webhooks: true,
+    payments: false,
+    orders: true,
+    transaction_search: true,
     refunds: false,
     disputes: false,
+    subscriptions: false,
+    payment_method_tokens: false,
+    currency_exchange: false,
     recipients: false,
     quotes: false,
     crypto_payments: false
@@ -46,23 +52,49 @@ const paypalProviderAdapter = createProviderAdapter({
   },
   supportedOperations: [
     'invoice.create',
+    'invoice.preview',
     'invoice.send',
     'invoice.refresh',
     'invoice.release_funds',
+    'invoice.cancel',
+    'invoice.remind',
+    'payout.preview',
     'payout.create',
     'payout.approve',
     'payout.reject',
     'payout.cancel_unclaimed',
-    'webhook.verify'
+    'payout.refresh',
+    'payment.capture.lookup',
+    'payment.authorization.lookup',
+    'payment.refund.lookup',
+    'payment.void.lookup',
+    'order.lookup',
+    'order.create.readiness',
+    'order.capture.readiness',
+    'transaction.search',
+    'webhook.verify',
+    'webhook.list',
+    'dispute.list.readiness',
+    'subscription.list.readiness',
+    'payment_method_token.list.readiness',
+    'currency_exchange.preview.readiness'
   ],
   docs: [
     'https://developer.paypal.com/docs/api/invoicing/v2/',
     'https://developer.paypal.com/docs/api/payments.payouts-batch/v1/',
-    'https://developer.paypal.com/docs/api/webhooks/v1/'
+    'https://developer.paypal.com/docs/api/payments/v2/',
+    'https://developer.paypal.com/docs/api/orders/v2/',
+    'https://developer.paypal.com/docs/api/transaction-search/v1/',
+    'https://developer.paypal.com/docs/api/webhooks/v1/',
+    'https://developer.paypal.com/docs/api/customer-disputes/v1/',
+    'https://developer.paypal.com/docs/api/subscriptions/v1/',
+    'https://developer.paypal.com/docs/api/payment-tokens/v3/',
+    'https://developer.paypal.com/docs/api/pricing/v2/'
   ],
   configuredNextActions: [
     'Keep PayPal as the live provider for current invoice and payout workflows.',
-    'Use provider state mapping instead of raw PayPal status strings in user-facing flows.'
+    'Use provider state mapping instead of raw PayPal status strings in user-facing flows.',
+    'Use PayPal Orders lookup and Transaction Search as read-only reconciliation/support tools until mutating order flows are fully audited.'
   ],
   nextActions: [
     'Set PayPal OAuth and webhook environment variables.',

@@ -46,6 +46,16 @@ async function findMany(filters = {}, client = db) {
     clauses.push('severity = ?');
     params.push(filters.severity);
   }
+  if (filters.provider) {
+    const provider = String(filters.provider).toLowerCase();
+    if (provider === 'paypal') {
+      clauses.push("(metadata_json IS NULL OR metadata_json = '{}' OR lower(metadata_json) NOT LIKE '%\"provider\":%' OR lower(metadata_json) LIKE ?)");
+      params.push('%"provider":"paypal"%');
+    } else {
+      clauses.push('lower(metadata_json) LIKE ?');
+      params.push(`%"provider":"${provider}"%`);
+    }
+  }
 
   const whereClause = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   let sql = `SELECT * FROM payment_ops_issues ${whereClause} ORDER BY status ASC, severity DESC, last_seen_at DESC`;

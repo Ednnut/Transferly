@@ -1,16 +1,22 @@
-const { close, db, initializeDatabase, loadSchemaSql } = require('../db');
-const config = require('../config');
-const { bootstrapService } = require('../services/bootstrapService');
-const { paypalInvoiceService } = require('../services/paypalInvoiceService');
-const { paypalPayoutService } = require('../services/paypalPayoutService');
+let closeDatabase = async () => {};
 
-function requireEnv(name) {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is required for PayPal sandbox smoke verification.`);
+const requiredEnvironment = [
+  'REDIS_URL',
+  'PAYPAL_CLIENT_ID',
+  'PAYPAL_CLIENT_SECRET',
+  'PAYPAL_WEBHOOK_ID',
+  'PAYPAL_SANDBOX_INVOICE_RECIPIENT_EMAIL',
+  'PAYPAL_SANDBOX_PAYOUT_RECEIVER'
+];
+
+function assertRequiredEnvironment(names) {
+  const missing = names.filter((name) => !process.env[name]);
+
+  if (missing.length) {
+    throw new Error(
+      `Missing required environment variables for PayPal sandbox smoke verification: ${missing.join(', ')}.`
+    );
   }
-
-  return value;
 }
 
 function parsePositiveAmount(value, fallback) {
@@ -30,8 +36,18 @@ function output(section, payload) {
 }
 
 async function run() {
-  const invoiceRecipientEmail = requireEnv('PAYPAL_SANDBOX_INVOICE_RECIPIENT_EMAIL');
-  const payoutReceiver = requireEnv('PAYPAL_SANDBOX_PAYOUT_RECEIVER');
+  assertRequiredEnvironment(requiredEnvironment);
+
+  const { close, db, initializeDatabase, loadSchemaSql } = require('../db');
+  const config = require('../config');
+  const { bootstrapService } = require('../services/bootstrapService');
+  const { paypalInvoiceService } = require('../services/paypalInvoiceService');
+  const { paypalPayoutService } = require('../services/paypalPayoutService');
+
+  closeDatabase = close;
+
+  const invoiceRecipientEmail = process.env.PAYPAL_SANDBOX_INVOICE_RECIPIENT_EMAIL;
+  const payoutReceiver = process.env.PAYPAL_SANDBOX_PAYOUT_RECEIVER;
   const currency = (process.env.PAYPAL_SANDBOX_CURRENCY || 'USD').toUpperCase();
   const invoiceAmount = parsePositiveAmount(process.env.PAYPAL_SANDBOX_INVOICE_AMOUNT, '12.50');
   const payoutAmount = parsePositiveAmount(process.env.PAYPAL_SANDBOX_PAYOUT_AMOUNT, '5.00');
@@ -41,7 +57,7 @@ async function run() {
 
   const bootstrap = await bootstrapService.ensureDemoAccount({
     userId: config.SEED_USER_ID || 'demo-user',
-    email: config.SEED_USER_EMAIL || 'demo@flashing.local',
+    email: config.SEED_USER_EMAIL || 'demo@transferly.local',
     displayName: config.SEED_USER_NAME || 'Demo User',
     countryCode: config.SEED_USER_COUNTRY || 'US',
     currencyCode: currency
@@ -57,7 +73,7 @@ async function run() {
     items: [
       {
         name: 'Sandbox verification invoice',
-        description: 'Manual invoice payment validation for Flashing.',
+        description: 'Manual invoice payment validation for Transferly.',
         quantity: 1,
         unitAmount: invoiceAmount
       }
@@ -113,11 +129,19 @@ async function run() {
   process.stdout.write('\n');
 }
 
-run()
-  .catch((error) => {
-    process.stderr.write(`${error.stack || error.message}\n`);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await close().catch(() => {});
-  });
+if (require.main === module) {
+  run()
+    .catch((error) => {
+      process.stderr.write(`${process.env.DEBUG === '1' ? error.stack || error.message : error.message}\n`);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await closeDatabase().catch(() => {});
+    });
+}
+
+module.exports = {
+  assertRequiredEnvironment,
+  requiredEnvironment,
+  run
+};

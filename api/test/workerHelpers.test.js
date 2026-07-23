@@ -4,12 +4,52 @@ const { describe, test } = require('node:test');
 const {
   RETRY_DELAYS_MS,
   buildDeadLetterPayload,
+  classifyWorkerFailure,
+  createClassifiedJobProcessor,
+  createOrderJobProcessor,
   createPayoutJobProcessor,
   createWorkerFailureHandler,
   hasExhaustedAttempts
 } = require('../jobs/workerHelpers');
 
 describe('worker helpers', () => {
+  test('order job processor delegates to the order service with stable job metadata', async () => {
+    const calls = [];
+    const processor = createOrderJobProcessor({
+      orderService: {
+        async processQueuedOrder(input) {
+          calls.push(input);
+          return {
+            order: {
+              id: input.orderId
+            }
+          };
+        }
+      }
+    });
+
+    const result = await processor({
+      id: 'job-order-1',
+      data: {
+        orderId: 'order-1',
+        dispatchGeneration: 3,
+        correlationId: 'correlation-1'
+      },
+      attemptsMade: 2
+    });
+
+    assert.equal(result.order.id, 'order-1');
+    assert.deepEqual(calls, [
+      {
+        orderId: 'order-1',
+        dispatchGeneration: 3,
+        jobId: 'job-order-1',
+        correlationId: 'correlation-1',
+        queueAttempt: 3
+      }
+    ]);
+  });
+
   test('payout job processor schedules a retry when the provider status is pending', async () => {
     const retryCalls = [];
     const payoutService = {
@@ -49,7 +89,7 @@ describe('worker helpers', () => {
           payoutId: 'payout-1'
         },
         options: {
-          jobId: 'retry-payout:payout-1:123456',
+          jobId: 'q-12-payout-retry-8-payout-1-6-123456',
           delay: RETRY_DELAYS_MS.initialPayoutPoll
         }
       }
@@ -90,10 +130,14 @@ describe('worker helpers', () => {
     assert.equal(addCalled, false);
   });
 
-  test('failure handler sends exhausted jobs to the dead-letter queue', async () => {
+  test('failure handler runs exhausted hooks and sends exhausted jobs to the dead-letter queue', async () => {
     const deadLetterCalls = [];
+    const exhaustedCalls = [];
     const onFailure = createWorkerFailureHandler({
       queueName: 'payout-process',
+      async onExhausted(job, error) {
+        exhaustedCalls.push({ jobId: job.id, error: error.message });
+      },
       deadLetterQueue: {
         async add(name, payload) {
           deadLetterCalls.push({ name, payload });
@@ -111,6 +155,12 @@ describe('worker helpers', () => {
       new Error('processing failed')
     );
 
+    assert.deepEqual(exhaustedCalls, [
+      {
+        jobId: 'job-1',
+        error: 'processing failed'
+      }
+    ]);
     assert.deepEqual(deadLetterCalls, [
       {
         name: 'payout-process-dead-letter',
@@ -146,6 +196,83 @@ describe('worker helpers', () => {
     );
 
     assert.equal(addCalled, false);
+  });
+
+  test('failure classification only stops retries for explicit or non-transient client errors', () => {
+    assert.deepEqual(classifyWorkerFailure({ statusCode: 400, code: 'BAD_INPUT' }), {
+      classification: 'terminal',
+      retryable: false,
+      code: 'BAD_INPUT'
+    });
+    assert.equal(classifyWorkerFailure({ statusCode: 429 }).retryable, true);
+    assert.equal(classifyWorkerFailure(new Error('provider timeout')).retryable, true);
+    assert.equal(classifyWorkerFailure({ retryable: false }).classification, 'terminal');
+  });
+
+  test('classified processor discards terminal jobs before rethrowing', async () => {
+    const error = Object.assign(new Error('invalid payload'), { statusCode: 422 });
+    let discarded = false;
+    const processor = createClassifiedJobProcessor(async () => {
+      throw error;
+    });
+
+    await assert.rejects(
+      processor({
+        discard() {
+          discarded = true;
+        }
+      }),
+      error
+    );
+    assert.equal(discarded, true);
+  });
+
+  test('terminal failures are finalized without consuming configured retries', async () => {
+    let deadLetterCalled = false;
+    const onFailure = createWorkerFailureHandler({
+      queueName: 'order-process',
+      async deadLetterHandler() {
+        deadLetterCalled = true;
+      }
+    });
+
+    await onFailure(
+      {
+        id: 'job-terminal',
+        attemptsMade: 1,
+        opts: { attempts: 5 }
+      },
+      Object.assign(new Error('invalid order'), { statusCode: 422 })
+    );
+
+    assert.equal(deadLetterCalled, true);
+  });
+
+  test('failure handler still writes the dead letter when the exhausted hook fails', async () => {
+    let deadLetterCalled = false;
+    const hookError = new Error('terminalization failed');
+    const onFailure = createWorkerFailureHandler({
+      queueName: 'order-process',
+      async onExhausted() {
+        throw hookError;
+      },
+      async deadLetterHandler() {
+        deadLetterCalled = true;
+      }
+    });
+
+    await assert.rejects(
+      onFailure(
+        {
+          id: 'job-exhausted',
+          attemptsMade: 5,
+          opts: { attempts: 5 }
+        },
+        new Error('processing failed')
+      ),
+      hookError
+    );
+    assert.equal(deadLetterCalled, true);
   });
 
   test('dead-letter payloads and attempt exhaustion are computed predictably', () => {

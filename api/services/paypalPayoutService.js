@@ -90,7 +90,7 @@ async function fetchPayoutBatchDetails(payout) {
           sender_batch_header: {
             sender_batch_id: payout.senderBatchId,
             email_subject: 'You have a payout',
-            email_message: 'You have received a payout from Flashing.'
+            email_message: 'You have received a payout from Transferly.'
           },
           items: [
             {
@@ -99,7 +99,7 @@ async function fetchPayoutBatchDetails(payout) {
                 value: (payout.amountCents / 100).toFixed(2),
                 currency: payout.currencyCode
               },
-              note: payout.note || 'Flashing payout',
+              note: payout.note || 'Transferly payout',
               receiver: payout.receiver,
               sender_item_id: payout.id
             }

@@ -1,4 +1,4 @@
-# Flashing Backend Architecture
+# Transferly Backend Architecture
 
 ## Primary Modules
 - `paypalInvoiceService`: creates, sends, fetches, and normalizes PayPal invoices.
@@ -9,7 +9,7 @@
 - `auditLogService`: persists action trails for system and operator actions.
 
 ## Reference Style
-- This repo mirrors the `vocalynz/voicednut/api` handling style:
+- This repo follows the current Transferly backend handling style:
   - a single backend runtime subtree
   - CommonJS modules
   - Express middleware-first request flow

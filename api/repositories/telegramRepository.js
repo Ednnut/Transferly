@@ -20,6 +20,10 @@ function mapAccount(row) {
     first_name: row.first_name,
     lastName: row.last_name,
     last_name: row.last_name,
+    languageCode: row.language_code,
+    language_code: row.language_code,
+    lastAuthenticatedAt: row.last_authenticated_at,
+    last_authenticated_at: row.last_authenticated_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     created_at: row.created_at,
@@ -63,14 +67,17 @@ async function upsertAccount(data, client = db) {
   await client.run(
     `
       INSERT INTO telegram_accounts (
-        id, user_id, telegram_user_id, chat_id, username, first_name, last_name, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, user_id, telegram_user_id, chat_id, username, first_name, last_name,
+        language_code, last_authenticated_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(telegram_user_id) DO UPDATE SET
         user_id = excluded.user_id,
         chat_id = excluded.chat_id,
         username = excluded.username,
         first_name = excluded.first_name,
         last_name = excluded.last_name,
+        language_code = excluded.language_code,
+        last_authenticated_at = excluded.last_authenticated_at,
         updated_at = excluded.updated_at
     `,
     [
@@ -81,6 +88,8 @@ async function upsertAccount(data, client = db) {
       data.username || null,
       data.firstName || null,
       data.lastName || null,
+      data.languageCode || null,
+      data.lastAuthenticatedAt || now,
       existing?.createdAt || now,
       now
     ]

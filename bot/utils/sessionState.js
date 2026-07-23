@@ -48,7 +48,12 @@ const initialSessionState = () => ({
   flow: null,
   errors: [],
   menuMessages: [],
-  actionHistory: {}
+  actionHistory: {},
+  callbackRegistry: {},
+  lastProvider: null,
+  lastLane: null,
+  lastFilters: {},
+  lastAction: null
 });
 
 function ensureSession(ctx) {
@@ -65,6 +70,17 @@ function ensureSession(ctx) {
       ctx.session.actionHistory && typeof ctx.session.actionHistory === 'object'
         ? ctx.session.actionHistory
         : {};
+    ctx.session.callbackRegistry =
+      ctx.session.callbackRegistry && typeof ctx.session.callbackRegistry === 'object'
+        ? ctx.session.callbackRegistry
+        : {};
+    ctx.session.lastProvider = ctx.session.lastProvider || null;
+    ctx.session.lastLane = ctx.session.lastLane || null;
+    ctx.session.lastFilters =
+      ctx.session.lastFilters && typeof ctx.session.lastFilters === 'object'
+        ? ctx.session.lastFilters
+        : {};
+    ctx.session.lastAction = ctx.session.lastAction || null;
     if (ctx.session.currentOp && ctx.session.currentOp.id && !ctx.session.currentOp.token) {
       ctx.session.currentOp.token = ctx.session.currentOp.id.replace(/-/g, '').slice(0, 8);
     }
@@ -146,6 +162,34 @@ function resetSession(ctx) {
   ctx.session.pendingControllers = [];
   ctx.session.flow = null;
   ctx.session.errors = [];
+  ctx.session.callbackRegistry = {};
+}
+
+function rememberProviderContext(ctx, context = {}) {
+  ensureSession(ctx);
+  const { provider, lane, filters, action } = context;
+  if (provider) {
+    ctx.session.lastProvider = String(provider).toLowerCase();
+  }
+  if (lane) {
+    ctx.session.lastLane = String(lane);
+  }
+  if (filters && typeof filters === 'object') {
+    ctx.session.lastFilters = { ...filters };
+  }
+  if (action) {
+    ctx.session.lastAction = String(action);
+  }
+}
+
+function getSessionContinuity(ctx) {
+  ensureSession(ctx);
+  return {
+    provider: ctx.session.lastProvider || null,
+    lane: ctx.session.lastLane || null,
+    filters: ctx.session.lastFilters || {},
+    action: ctx.session.lastAction || null
+  };
 }
 
 function ensureOperationActive(ctx, opId) {
@@ -187,7 +231,7 @@ function ensureFlow(ctx, name, options = {}) {
 async function safeReset(ctx, reason = 'reset', options = {}) {
   const {
     message = '⚠️ Session expired. Restarting call setup...',
-    menuHint = '📋 Use /menu to start again.',
+    menuHint = 'Use /start to begin again.',
     notify = true
   } = options;
 
@@ -241,6 +285,8 @@ module.exports = {
   registerAbortController,
   resetSession,
   ensureSession,
+  rememberProviderContext,
+  getSessionContinuity,
   ensureOperationActive,
   ensureFlow,
   safeReset,

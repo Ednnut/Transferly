@@ -1,19 +1,24 @@
 const { authService } = require('../services/authService');
-const { loginSchema, registerSchema } = require('../schemas/authSchemas');
+const { telegramMiniAppLoginSchema } = require('../schemas/authSchemas');
 
-async function registerController(request, response) {
-  const body = registerSchema.parse(request.body || {});
-  const result = await authService.register(body);
-  response.status(201).json(result);
+async function telegramMiniAppLoginController(request, response) {
+  const body = telegramMiniAppLoginSchema.parse(request.body || {});
+  const result = await authService.loginWithTelegramMiniApp(body);
+  response.json(result);
 }
 
-async function loginController(request, response) {
-  const body = loginSchema.parse(request.body || {});
-  const result = await authService.login(body);
+async function refreshSessionController(request, response) {
+  const result = await authService.refreshSession(request.auth);
+  response.json(result);
+}
+
+async function logoutController(request, response) {
+  const result = await authService.logoutSession(request.auth);
   response.json(result);
 }
 
 module.exports = {
-  registerController,
-  loginController
+  logoutController,
+  refreshSessionController,
+  telegramMiniAppLoginController
 };

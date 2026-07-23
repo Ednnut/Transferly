@@ -22,6 +22,7 @@ function isPastDue(dueDate) {
 
 async function syncInvoiceIssues(invoice, client) {
   const activeIssueTypes = [];
+  const provider = String(invoice.metadata?.provider || 'paypal').toLowerCase();
 
   if (
     ['SENT', 'SCHEDULED', 'UPDATED'].includes(invoice.status) &&
@@ -37,6 +38,7 @@ async function syncInvoiceIssues(invoice, client) {
         status: OPEN_STATUS,
         summary: `Invoice ${invoice.invoiceNumber} is overdue and still awaiting settlement.`,
         metadata: {
+          provider,
           paypal_invoice_id: invoice.paypalInvoiceId,
           due_date: invoice.dueDate,
           status: invoice.status
@@ -57,6 +59,7 @@ async function syncInvoiceIssues(invoice, client) {
         status: OPEN_STATUS,
         summary: `Invoice ${invoice.invoiceNumber} needs provider attention after sync failure.`,
         metadata: {
+          provider,
           paypal_invoice_id: invoice.paypalInvoiceId,
           status: invoice.status
         }
@@ -109,6 +112,7 @@ function payoutIssueDescriptor(payout) {
 async function syncPayoutIssues(payout, client) {
   const issue = payoutIssueDescriptor(payout);
   const activeIssueTypes = issue ? [issue.issueType] : [];
+  const provider = String(payout.metadata?.provider || 'paypal').toLowerCase();
 
   if (issue) {
     await paymentOpsIssueRepository.upsert(
@@ -120,6 +124,7 @@ async function syncPayoutIssues(payout, client) {
         status: OPEN_STATUS,
         summary: issue.summary,
         metadata: {
+          provider,
           payout_item_id: payout.paypalPayoutItemId || null,
           provider_item_status: payout.metadata?.provider_item_status || null,
           provider_batch_status: payout.metadata?.provider_batch_status || null,

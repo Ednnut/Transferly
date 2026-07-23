@@ -1,6 +1,5 @@
 const { assertCanAccessUserResource } = require('../middleware/authenticateRequest');
 const {
-  changeCurrentUserPasswordSchema,
   createTopUpOrderSchema,
   topUpOrderParamsSchema,
   updateTopUpOrderStatusSchema,
@@ -22,13 +21,6 @@ async function updateCurrentUserProfileController(request, response) {
   const user = await slipcraftUserService.updateProfile(request.auth.userId, body);
 
   response.json({ user });
-}
-
-async function changeCurrentUserPasswordController(request, response) {
-  const body = changeCurrentUserPasswordSchema.parse(request.body || {});
-  const result = await slipcraftUserService.changePassword(request.auth.userId, body);
-
-  response.json(result);
 }
 
 async function deleteCurrentUserAccountController(request, response) {
@@ -55,7 +47,6 @@ async function updateCurrentUserTopUpOrderStatusController(request, response) {
 }
 
 module.exports = {
-  changeCurrentUserPasswordController,
   createCurrentUserTopUpOrderController,
   deleteCurrentUserAccountController,
   getUserPointsController,

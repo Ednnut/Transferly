@@ -1,6 +1,7 @@
 const config = require('../config');
 const { close, initializeDatabase } = require('../db');
 const { logger } = require('../utils/logger');
+const { closeServiceReplayStore } = require('../utils/serviceReplayStore');
 
 async function startServer(createApp) {
   await initializeDatabase();
@@ -35,6 +36,7 @@ async function startServer(createApp) {
 
     try {
       await closeServer();
+      await closeServiceReplayStore();
       await redisConnection.quit();
       await close();
       process.exit(0);
@@ -60,6 +62,7 @@ async function failServerBootstrap(error) {
   logger.error({ err: error }, 'API bootstrap failed');
 
   try {
+    await closeServiceReplayStore();
     await redisConnection.quit();
     await close();
   } catch (_shutdownError) {

@@ -4,10 +4,11 @@ const path = require('node:path');
 require('dotenv').config();
 const sqlite3 = require('sqlite3').verbose();
 
-const sqliteDatabasePath = path.resolve(process.env.SQLITE_DATABASE_PATH || './data/flashing.sqlite');
+const sqliteDatabasePath = path.resolve(process.env.SQLITE_DATABASE_PATH || './data/transferly.sqlite');
 fs.mkdirSync(path.dirname(sqliteDatabasePath), { recursive: true });
 
 const database = new sqlite3.Database(sqliteDatabasePath);
+let transactionTail = Promise.resolve();
 
 function run(sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -79,7 +80,7 @@ function createClient() {
   };
 }
 
-async function transaction(callback) {
+async function executeTransaction(callback) {
   await run('BEGIN IMMEDIATE');
   try {
     const result = await callback(createClient());
@@ -89,6 +90,12 @@ async function transaction(callback) {
     await run('ROLLBACK');
     throw error;
   }
+}
+
+function transaction(callback) {
+  const pending = transactionTail.then(() => executeTransaction(callback));
+  transactionTail = pending.catch(() => undefined);
+  return pending;
 }
 
 function close() {
@@ -113,5 +120,6 @@ module.exports = {
   initializeDatabase,
   transaction,
   close,
-  loadSchemaSql
+  loadSchemaSql,
+  sqliteDatabasePath
 };

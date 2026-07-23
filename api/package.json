@@ -1,8 +1,8 @@
 {
-  "name": "flashing-api",
+  "name": "transferly-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Production-grade PayPal invoicing and payouts backend",
+  "description": "Transferly production-grade payments, invoicing, payouts, and wallet backend",
   "main": "app.js",
   "type": "commonjs",
   "scripts": {
@@ -11,12 +11,17 @@
     "start": "node app.js",
     "worker": "node jobs/worker.js",
     "db:migrate": "node db/migrate.js",
+    "db:migrate:status": "node db/migrationStatus.js",
     "db:seed": "node db/seed.js",
+    "smoke:providers": "node scripts/providerSmoke.js",
+    "smoke:readiness": "node scripts/deploymentReadinessSmoke.js",
     "verify:paypal:sandbox": "node scripts/paypalSandboxSmoke.js",
     "lint": "eslint .",
     "test": "node --test --test-concurrency=1"
   },
   "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "bullmq": "^5.34.10",
     "compression": "^1.7.5",
     "cors": "^2.8.5",
@@ -26,7 +31,8 @@
     "helmet": "^8.0.0",
     "ioredis": "^5.4.1",
     "pino": "^9.5.0",
-    "sqlite3": "^5.1.7",
+    "sqlite3": "^6.0.1",
+    "tweetnacl": "^1.0.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {

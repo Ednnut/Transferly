@@ -1,11 +1,10 @@
 const { transaction } = require('../db');
-const { pointTransactionRepository } = require('../repositories/pointTransactionRepository');
-const { profileRepository } = require('../repositories/profileRepository');
 const { topUpOrderRepository } = require('../repositories/topUpOrderRepository');
 const { userRepository } = require('../repositories/userRepository');
 const { AUDIT_ACTOR_TYPE, POINT_TRANSACTION_TYPE, TOP_UP_ORDER_STATUS } = require('../utils/constants');
 const { AppError } = require('../utils/errors');
 const { auditLogService } = require('./auditLogService');
+const { pointLedgerService } = require('./pointLedgerService');
 
 async function getUserOrThrow(userId, client) {
   const user = await userRepository.findById(userId, client);
@@ -136,13 +135,15 @@ async function completeOrder({ orderId, adminActorId, notes }) {
       throw new AppError(409, 'TOP_UP_ORDER_CANCELLED', 'Cancelled top-up orders cannot be completed.');
     }
 
-    const nextProfile = await profileRepository.incrementPoints(order.userId, order.points, client);
-    await pointTransactionRepository.create(
+    const ledgerResult = await pointLedgerService.applyEntry(
       {
+        entryKey: `point-ledger:top-up:${order.id}`,
         userId: order.userId,
         type: POINT_TRANSACTION_TYPE.TOP_UP_PURCHASE,
         amount: order.points,
         description: `Top-up order ${order.id}`,
+        referenceType: 'TOP_UP_ORDER',
+        referenceId: order.id,
         metadata: {
           order_id: order.id,
           method_id: order.methodId,
@@ -172,7 +173,7 @@ async function completeOrder({ orderId, adminActorId, notes }) {
         metadata: {
           points: order.points,
           userId: order.userId,
-          nextPoints: nextProfile?.points ?? null
+          nextPoints: ledgerResult.profile.points
         }
       },
       client

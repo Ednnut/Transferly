@@ -1,9 +1,9 @@
 const { transaction } = require('../db');
 const { platformConfigRepository } = require('../repositories/platformConfigRepository');
-const { pointTransactionRepository } = require('../repositories/pointTransactionRepository');
 const { profileRepository } = require('../repositories/profileRepository');
 const { referralEventRepository } = require('../repositories/referralEventRepository');
 const { auditLogService } = require('./auditLogService');
+const { pointLedgerService } = require('./pointLedgerService');
 const {
   AUDIT_ACTOR_TYPE,
   POINT_TRANSACTION_TYPE
@@ -14,14 +14,14 @@ function calculatePointsEarned(events) {
   return events.reduce((total, event) => total + Number(event.bonus_points || event.bonusPoints || 0), 0);
 }
 
-async function getStats(userId) {
-  const profile = await profileRepository.findByUserId(userId);
+async function getStats(userId, client) {
+  const profile = await profileRepository.findByUserId(userId, client);
   if (!profile) {
     throw new AppError(404, 'PROFILE_NOT_FOUND', 'Profile not found.');
   }
 
-  const referredUsers = await profileRepository.listReferredUsers(userId);
-  const events = await referralEventRepository.findByReferrerUserId(userId);
+  const referredUsers = await profileRepository.listReferredUsers(userId, client);
+  const events = await referralEventRepository.findByReferrerUserId(userId, client);
 
   return {
     user_id: userId,
@@ -67,7 +67,6 @@ async function claimReferral(userId, referralCode) {
       },
       client
     );
-    await profileRepository.incrementPoints(referrerProfile.userId, platformConfig.referral_bonus, client);
     await profileRepository.incrementReferralCount(referrerProfile.userId, 1, client);
 
     const event = await referralEventRepository.create(
@@ -84,19 +83,24 @@ async function claimReferral(userId, referralCode) {
       client
     );
 
-    await pointTransactionRepository.create(
-      {
-        userId: referrerProfile.userId,
-        type: POINT_TRANSACTION_TYPE.REFERRAL_BONUS,
-        amount: platformConfig.referral_bonus,
-        description: `Referral bonus earned for user ${userId}.`,
-        metadata: {
-          referredUserId: userId,
-          eventId: event.id
-        }
-      },
-      client
-    );
+    if (platformConfig.referral_bonus > 0) {
+      await pointLedgerService.applyEntry(
+        {
+          entryKey: `point-ledger:referral:${event.id}`,
+          userId: referrerProfile.userId,
+          type: POINT_TRANSACTION_TYPE.REFERRAL_BONUS,
+          amount: platformConfig.referral_bonus,
+          description: `Referral bonus earned for user ${userId}.`,
+          referenceType: 'REFERRAL_EVENT',
+          referenceId: event.id,
+          metadata: {
+            referredUserId: userId,
+            eventId: event.id
+          }
+        },
+        client
+      );
+    }
 
     await auditLogService.log(
       {
@@ -113,7 +117,7 @@ async function claimReferral(userId, referralCode) {
       client
     );
 
-    return getStats(referrerProfile.userId);
+    return getStats(referrerProfile.userId, client);
   });
 }
 

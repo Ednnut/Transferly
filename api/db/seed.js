@@ -1,9 +1,9 @@
-const { close, initializeDatabase, db, loadSchemaSql } = require('./index');
+const { close } = require('./index');
+const { migrate } = require('./migrate');
 const { bootstrapService } = require('../services/bootstrapService');
 
 async function seed() {
-  await initializeDatabase();
-  await db.exec(loadSchemaSql());
+  await migrate();
 
   const result = await bootstrapService.ensureDemoAccount();
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

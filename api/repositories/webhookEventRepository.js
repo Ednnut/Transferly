@@ -3,6 +3,8 @@ const { randomUUID } = require('node:crypto');
 const { db } = require('../db');
 const { parseJson, serializeJson } = require('../utils/records');
 
+const providerPrefixes = ['paypal', 'stripe', 'crypto', 'paystack', 'flutterwave', 'wise'];
+
 function mapWebhookEvent(row) {
   if (!row) {
     return null;
@@ -35,6 +37,11 @@ async function findById(id, client = db) {
   return mapWebhookEvent(row);
 }
 
+async function findByIdentifier(identifier, client = db) {
+  const row = await client.get('SELECT * FROM webhook_events WHERE id = ? OR event_id = ?', [identifier, identifier]);
+  return mapWebhookEvent(row);
+}
+
 async function findMany(filters = {}, client = db) {
   const clauses = [];
   const params = [];
@@ -46,6 +53,22 @@ async function findMany(filters = {}, client = db) {
   if (filters.eventType) {
     clauses.push('event_type = ?');
     params.push(filters.eventType);
+  }
+  if (filters.provider) {
+    const provider = String(filters.provider).toLowerCase();
+    if (provider === 'paypal') {
+      clauses.push(`(
+        lower(event_id) LIKE 'paypal:%'
+        OR lower(payload_json) LIKE ?
+        OR (${providerPrefixes.map(() => 'lower(event_id) NOT LIKE ?').join(' AND ')}
+          AND lower(payload_json) NOT LIKE '%"provider":%')
+      )`);
+      params.push('%"provider":"paypal"%');
+      providerPrefixes.forEach((prefix) => params.push(`${prefix}:%`));
+    } else {
+      clauses.push('(lower(event_id) LIKE ? OR lower(payload_json) LIKE ?)');
+      params.push(`${provider}:%`, `%"provider":"${provider}"%`);
+    }
   }
 
   let sql = 'SELECT * FROM webhook_events';
@@ -131,6 +154,7 @@ module.exports = {
     create,
     findByEventId,
     findById,
+    findByIdentifier,
     findMany,
     update
   }

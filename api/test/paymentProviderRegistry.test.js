@@ -53,6 +53,34 @@ describe('paymentProviderRegistry', () => {
     assert.ok(byProvider.crypto.invoice_features.safeguards.includes('underpayment_detection'));
   });
 
+  test('exposes provider adapter contracts without secret values', () => {
+    const contracts = paymentProviderRegistry.listProviderAdapterContracts();
+    const stripe = paymentProviderRegistry.getProviderAdapterContract('stripe');
+    const expectedMethods = [
+      'createInvoice',
+      'sendInvoice',
+      'previewInvoice',
+      'createPayout',
+      'previewPayout',
+      'refreshTransaction',
+      'getBalance',
+      'listTransactions',
+      'verifyWebhook',
+      'normalizeWebhookEvent',
+      'mapProviderStatus'
+    ];
+
+    assert.equal(contracts.length, 6);
+    assert.deepEqual(Object.keys(stripe.operations), expectedMethods);
+    assert.equal(stripe.operations.createInvoice.status, 'preview');
+    assert.equal(stripe.operations.previewPayout.status, 'preview');
+    assert.equal(stripe.operations.normalizeWebhookEvent.status, 'preview');
+
+    const serialized = JSON.stringify({ contracts, stripe });
+    assert.doesNotMatch(serialized, /paypal-client-secret/);
+    assert.doesNotMatch(serialized, /STRIPE_SECRET_KEY=/);
+  });
+
   test('returns one provider invoice feature contract by key', () => {
     const crypto = paymentProviderRegistry.getProviderInvoiceFeatures('crypto');
 

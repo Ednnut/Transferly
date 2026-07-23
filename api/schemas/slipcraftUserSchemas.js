@@ -8,10 +8,6 @@ const updateCurrentUserProfileSchema = z.object({
   name: z.string().trim().min(1).max(120)
 });
 
-const changeCurrentUserPasswordSchema = z.object({
-  newPassword: z.string().trim().min(8).max(128)
-});
-
 const topUpOrderParamsSchema = z.object({
   id: z.string().trim().min(1)
 });
@@ -33,7 +29,6 @@ const updateTopUpOrderStatusSchema = z.object({
 });
 
 module.exports = {
-  changeCurrentUserPasswordSchema,
   createTopUpOrderSchema,
   topUpOrderParamsSchema,
   updateTopUpOrderStatusSchema,

@@ -1,24 +1,29 @@
+const path = require('node:path');
+
+const rootDir = path.resolve(__dirname, '..');
+const botDir = __dirname;
+const logDir = path.join(rootDir, 'logs', 'bot');
+
 module.exports = {
   apps: [
     {
-      name: 'BOT',
+      name: 'transferly-bot',
       script: './bot.js',
-      cwd: '/home/ubuntu/transferly/bot',
-      instances: 1, // ✅ Single instance
+      cwd: botDir,
+      instances: 1,
       exec_mode: 'fork',
 
       env: {
-        NODE_ENV: 'production',
+        NODE_ENV: 'development'
       },
 
       restart_delay: 2000,
       max_restarts: 5,
       min_uptime: '10s',
 
-      log_file: '/home/ubuntu/transferly/logs/bot/combined.log',
-      out_file: '/home/ubuntu/transferly/logs/bot/out.log',
-      error_file: '/home/ubuntu/transferly/logs/bot/error.log',
-      log_type: 'json',
+      log_file: path.join(logDir, 'bot.combined.log'),
+      out_file: path.join(logDir, 'bot.out.log'),
+      error_file: path.join(logDir, 'bot.error.log'),
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
 
       watch: false,
@@ -27,18 +32,13 @@ module.exports = {
       max_memory_restart: '1G',
       kill_timeout: 5000,
 
-      // 🔥 Removed wait_ready and listen_timeout
-      // wait_ready: true,
-      // listen_timeout: 3000,
-
       health_check_grace_period: 3000,
       merge_logs: true,
       time: true,
       autorestart: true,
 
       env_production: {
-        NODE_ENV: 'production',
-        PORT: 1337,
+        NODE_ENV: 'production'
       },
 
       env_development: {

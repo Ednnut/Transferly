@@ -17,11 +17,57 @@ const paypalClient = new PayPalClient(
   config.PAYPAL_ENVIRONMENT
 );
 
+function isUniqueConstraintError(error) {
+  return error?.code === 'SQLITE_CONSTRAINT' || /unique constraint/i.test(String(error?.message || ''));
+}
+
+async function createWebhookEventOnce(data) {
+  try {
+    return {
+      duplicate: false,
+      webhookEvent: await webhookEventRepository.create(data)
+    };
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) {
+      throw error;
+    }
+
+    const existing = await webhookEventRepository.findByEventId(data.eventId);
+    if (!existing) {
+      throw error;
+    }
+
+    return {
+      duplicate: true,
+      webhookEvent: existing
+    };
+  }
+}
+
+function assertPayPalSignatureHeaders(headers = {}) {
+  const missing = [
+    ['authAlgo', headers.authAlgo],
+    ['certUrl', headers.certUrl],
+    ['transmissionId', headers.transmissionId],
+    ['transmissionSig', headers.transmissionSig],
+    ['transmissionTime', headers.transmissionTime]
+  ]
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+
+  if (missing.length > 0) {
+    throw new AppError(400, 'INVALID_WEBHOOK_SIGNATURE', 'PayPal webhook signature headers are required.', {
+      missing_headers: missing
+    });
+  }
+}
+
 async function ingestPayPalEvent(headers, event) {
   const eventId = String(event.id || '');
   if (!eventId) {
     throw new AppError(400, 'INVALID_WEBHOOK_EVENT', 'Webhook event id is required.');
   }
+  assertPayPalSignatureHeaders(headers);
 
   const existing = await webhookEventRepository.findByEventId(eventId);
   if (existing) {
@@ -31,7 +77,7 @@ async function ingestPayPalEvent(headers, event) {
     };
   }
 
-  const webhookEvent = await webhookEventRepository.create({
+  const createResult = await createWebhookEventOnce({
     eventId,
     eventType: String(event.event_type || 'unknown'),
     resourceType: typeof event.resource_type === 'string' ? event.resource_type : null,
@@ -40,6 +86,10 @@ async function ingestPayPalEvent(headers, event) {
     payload: event,
     verificationPayload: null
   });
+  if (createResult.duplicate) {
+    return createResult;
+  }
+  const { webhookEvent } = createResult;
 
   const verificationPayload = {
     auth_algo: headers.authAlgo,
@@ -109,7 +159,7 @@ async function ingestVerifiedProviderEvent(input) {
     };
   }
 
-  const webhookEvent = await webhookEventRepository.create({
+  const createResult = await createWebhookEventOnce({
     eventId,
     eventType: input.eventType || 'unknown',
     resourceType: input.resourceType || null,
@@ -118,6 +168,10 @@ async function ingestVerifiedProviderEvent(input) {
     payload: input.payload,
     verificationPayload: input.verificationPayload || null
   });
+  if (createResult.duplicate) {
+    return createResult;
+  }
+  const { webhookEvent } = createResult;
 
   await auditLogService.log({
     actorType: AUDIT_ACTOR_TYPE.WEBHOOK,

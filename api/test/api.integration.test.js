@@ -24,6 +24,11 @@ process.env.STRIPE_PAYOUTS_ENABLED = 'true';
 process.env.CRYPTO_COMMERCE_API_KEY = 'crypto-commerce-key';
 process.env.CRYPTO_COMMERCE_WEBHOOK_SECRET = 'crypto-commerce-webhook-secret';
 process.env.CRYPTO_COMMERCE_API_BASE_URL = 'https://api.commerce.coinbase.test';
+process.env.TELEGRAM_BOT_TOKEN = '1234567890:test-mini-app-token';
+process.env.TELEGRAM_MINI_APP_URL = 'https://mini.transferly.test';
+process.env.TELEGRAM_MINI_APP_AUTH_EXPIRES_IN_SECONDS = '3600';
+process.env.TRANSFERLY_OWNER_TELEGRAM_USER_IDS = '9001003';
+process.env.TRANSFERLY_ADMIN_TELEGRAM_USER_IDS = '9001004';
 process.env.MAX_SINGLE_PAYOUT = '1000';
 process.env.DAILY_PAYOUT_LIMIT = '5000';
 process.env.MAX_PAYOUTS_PER_HOUR = '5';
@@ -32,6 +37,8 @@ process.env.HIGH_RISK_CURRENCIES = '';
 process.env.SUSPICIOUS_INVOICE_KEYWORDS = 'crypto,investment';
 process.env.API_RATE_LIMIT_MAX = '500';
 process.env.API_RATE_LIMIT_WINDOW_MS = '60000';
+process.env.AUTH_RATE_LIMIT_MAX = '500';
+process.env.AUTH_RATE_LIMIT_WINDOW_MS = '60000';
 process.env.JOB_WAIT_MS = '5000';
 process.env.ADMIN_API_TOKEN = 'admin-secret-token';
 process.env.ADMIN_API_ACTOR_ID = 'admin-api';
@@ -56,25 +63,38 @@ function removeSqliteArtifacts(filePath) {
 removeSqliteArtifacts(sqlitePath);
 
 const { createApp } = require('../app');
+const { dispatchOrderProcessing, dispatchPendingOrders } = require('../jobs/dispatchers');
 const { bootstrapService } = require('../services/bootstrapService');
 const { close, db, initializeDatabase, loadSchemaSql } = require('../db');
+const { auditLogRepository } = require('../repositories/auditLogRepository');
+const { authSessionRepository } = require('../repositories/authSessionRepository');
 const { faqRepository } = require('../repositories/faqRepository');
 const { invoiceRepository } = require('../repositories/invoiceRepository');
 const { invoiceTemplateRepository } = require('../repositories/invoiceTemplateRepository');
+const { orderEventRepository } = require('../repositories/orderEventRepository');
 const { payoutRepository } = require('../repositories/payoutRepository');
 const { paymentOpsIssueRepository } = require('../repositories/paymentOpsIssueRepository');
 const { platformConfigRepository } = require('../repositories/platformConfigRepository');
+const { pointReservationRepository } = require('../repositories/pointReservationRepository');
 const { profileRepository } = require('../repositories/profileRepository');
 const { receiptRepository } = require('../repositories/receiptRepository');
+const { serviceRepository } = require('../repositories/serviceRepository');
+const { serviceTemplateRepository } = require('../repositories/serviceTemplateRepository');
 const { telegramRepository } = require('../repositories/telegramRepository');
 const { testimonialRepository } = require('../repositories/testimonialRepository');
 const { userRepository } = require('../repositories/userRepository');
 const { webhookEventRepository } = require('../repositories/webhookEventRepository');
+const { catalogueService } = require('../services/catalogueService');
 const { opsService } = require('../services/opsService');
+const { orderService } = require('../services/orderService');
+const { pointLedgerService } = require('../services/pointLedgerService');
+const { SANDBOX_REQUIRED_MARKINGS } = require('../constants/serviceCatalogue');
+const { setPointBalance } = require('./helpers/pointLedgerFixtures');
 
 const originalFetch = global.fetch;
 const originalGetQueueOverview = opsService.getQueueOverview;
 const originalListDeadLetterJobs = opsService.listDeadLetterJobs;
+const originalRecoverDeadLetterJob = opsService.recoverDeadLetterJob;
 let app;
 let invoiceSequence = 0;
 let stripeInvoiceSequence = 0;
@@ -819,6 +839,25 @@ function bearerHeaders(token, headers = {}) {
   };
 }
 
+function createTelegramMiniAppInitData({ botToken = process.env.TELEGRAM_BOT_TOKEN, user, authDate, startParam }) {
+  const params = new URLSearchParams();
+  params.set('auth_date', String(authDate || Math.floor(Date.now() / 1000)));
+  params.set('user', JSON.stringify(user));
+  if (startParam) {
+    params.set('start_param', startParam);
+  }
+
+  const dataCheckString = [...params.entries()]
+    .map(([key, value]) => `${key}=${value}`)
+    .sort()
+    .join('\n');
+  const secret = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+  const hash = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
+  params.set('hash', hash);
+
+  return params.toString();
+}
+
 function decodeDataUrl(dataUrl, prefix) {
   assert.ok(dataUrl.startsWith(prefix), `Expected data URL prefix ${prefix}`);
   return Buffer.from(dataUrl.slice(prefix.length), 'base64').toString('utf8');
@@ -832,26 +871,20 @@ function assertReceiptArtifactsInclude(result, expectedText) {
   assert.ok(pdf.includes(expectedText), `Expected PDF receipt artifact to include "${expectedText}"`);
 }
 
-function assertReceiptLayout(result, providerName, category) {
-  const notice = `Transferly generated record. Not an official ${providerName} receipt.`;
-
-  assert.equal(result.receipt.data.layout.provider_name, providerName);
-  assert.equal(result.receipt.data.layout.category, category);
-  assert.equal(result.receipt.data.layout.notice, notice);
-  assertReceiptArtifactsInclude(result, providerName);
-  assertReceiptArtifactsInclude(result, category);
-  assertReceiptArtifactsInclude(result, notice);
-}
-
 async function resetDatabase() {
   await db.exec(`
+    DELETE FROM auth_sessions;
     DELETE FROM telegram_command_logs;
     DELETE FROM telegram_accounts;
     DELETE FROM risk_flags;
+    DELETE FROM payment_ops_issues;
     DELETE FROM ledger_entries;
     DELETE FROM email_dispatches;
     DELETE FROM referral_events;
     DELETE FROM top_up_orders;
+    DELETE FROM order_events;
+    DELETE FROM orders;
+    DELETE FROM point_reservations;
     DELETE FROM points_transactions;
     DELETE FROM receipts;
     DELETE FROM payouts;
@@ -872,6 +905,7 @@ before(async () => {
   installFetchStub();
   await initializeDatabase();
   await db.exec(loadSchemaSql());
+  await catalogueService.seedDefaultCatalogue(db);
 
   app = createApp();
 });
@@ -879,6 +913,7 @@ before(async () => {
 beforeEach(async () => {
   opsService.getQueueOverview = originalGetQueueOverview;
   opsService.listDeadLetterJobs = originalListDeadLetterJobs;
+  opsService.recoverDeadLetterJob = originalRecoverDeadLetterJob;
   await resetDatabase();
   invoiceSequence = 0;
   stripeInvoiceSequence = 0;
@@ -903,37 +938,38 @@ after(async () => {
   global.fetch = originalFetch;
   opsService.getQueueOverview = originalGetQueueOverview;
   opsService.listDeadLetterJobs = originalListDeadLetterJobs;
+  opsService.recoverDeadLetterJob = originalRecoverDeadLetterJob;
   await close();
   removeSqliteArtifacts(sqlitePath);
 });
 
 describe('API integration flows', () => {
-  test('user routes require bearer auth when USER_API_TOKENS are configured', async () => {
-    const payload = JSON.stringify({
-      userId: 'demo-user',
-      recipientEmail: 'buyer@example.com',
-      currency: 'USD',
-      description: 'Consulting retainer',
-      items: [
-        {
-          name: 'Consulting',
-          description: 'April retainer',
-          quantity: 1,
-          unitAmount: 125
-        }
-      ]
-    });
+  test('every private user route group requires bearer authentication', async () => {
+    const privateRequests = [
+      { method: 'POST', url: '/api/invoices' },
+      { method: 'GET', url: '/api/payouts' },
+      { method: 'GET', url: '/api/providers' },
+      { method: 'POST', url: '/api/receipt/generate' },
+      { method: 'POST', url: '/api/email/send' },
+      { method: 'POST', url: '/api/referral' },
+      { method: 'GET', url: '/api/user/demo-user/points' },
+      { method: 'GET', url: '/api/services' },
+      { method: 'GET', url: '/api/orders' },
+      { method: 'GET', url: '/api/assets' },
+      { method: 'GET', url: '/api/me' }
+    ];
 
-    const response = await injectRequest(app, {
-      method: 'POST',
-      url: '/api/invoices',
-      headers: jsonHeaders(payload),
-      body: payload
-    });
+    for (const request of privateRequests) {
+      const payload = request.method === 'POST' ? '{}' : undefined;
+      const response = await injectRequest(app, {
+        ...request,
+        headers: payload ? jsonHeaders(payload) : undefined,
+        body: payload
+      });
 
-    assert.equal(response.status, 401);
-    const body = response.json();
-    assert.equal(body.code, 'USER_AUTH_REQUIRED');
+      assert.equal(response.status, 401, `${request.method} ${request.url}`);
+      assert.equal(response.json().code, 'USER_AUTH_REQUIRED', `${request.method} ${request.url}`);
+    }
   });
 
   test('GET /api/bootstrap exposes public platform, FAQ, and testimonial content', async () => {
@@ -949,6 +985,49 @@ describe('API integration flows', () => {
     assert.ok(Array.isArray(body.testimonials));
   });
 
+  test('GET /api/health exposes Mini App connectivity checks', async () => {
+    const response = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/health',
+      headers: {
+        origin: 'https://mini.transferly.test'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers['access-control-allow-origin'], 'https://mini.transferly.test');
+    const body = response.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.status, 'healthy');
+    assert.equal(body.checks.telegramMiniAppUrl, true);
+    assert.equal(body.checks.telegramMiniAppAuth, true);
+    assert.ok(body.checks.corsOrigins >= 1);
+  });
+
+  test('GET /api/health/client exposes client-safe runtime diagnostics', async () => {
+    const response = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/health/client',
+      headers: {
+        origin: 'https://mini.transferly.test'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers['access-control-allow-origin'], 'https://mini.transferly.test');
+
+    const body = response.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.contractVersion, '2026-07-client-health-v1');
+    assert.equal(body.api.available, true);
+    assert.equal(body.auth.telegramMiniApp.enabled, true);
+    assert.equal(body.auth.telegramMiniApp.launchUrlConfigured, true);
+    assert.equal(typeof body.cors.allowedOriginCount, 'number');
+    assert.equal(body.featureFlags.providerWorkspace, true);
+    assert.ok(Array.isArray(body.nextActions));
+    assert.ok(body.requestId);
+  });
+
   test('GET /api/me requires a user identity and returns the current user snapshot', async () => {
     const unauthorizedResponse = await injectRequest(app, {
       method: 'GET',
@@ -959,6 +1038,7 @@ describe('API integration flows', () => {
     assert.equal(unauthorizedResponse.json().code, 'USER_AUTH_REQUIRED');
 
     const receiptPayload = JSON.stringify({
+      serviceSlug: 'faker-data',
       type: 'bank',
       title: 'My first receipt',
       details: {
@@ -976,6 +1056,35 @@ describe('API integration flows', () => {
 
     assert.equal(receiptResponse.status, 201);
 
+    await invoiceRepository.create({
+      userId: 'demo-user',
+      paypalInvoiceId: 'paypal-invoice-bootstrap-1',
+      invoiceNumber: 'INV-BOOTSTRAP-1',
+      status: 'PAID',
+      amountCents: 199900,
+      currencyCode: 'USD',
+      recipientEmail: 'finance@example.test',
+      description: 'Bootstrap invoice',
+      invoiceUrl: 'https://www.paypal.com/invoice/p/#bootstrap',
+      paypalDetails: { id: 'paypal-invoice-bootstrap-1' },
+      metadata: { provider: 'paypal' },
+      paidAt: new Date().toISOString()
+    });
+
+    await payoutRepository.create({
+      userId: 'demo-user',
+      idempotencyKey: 'bootstrap-payout-idempotency',
+      senderBatchId: 'bootstrap-payout-batch',
+      status: 'PENDING_APPROVAL',
+      riskDecision: 'review',
+      recipientType: 'EMAIL',
+      receiver: 'operator@example.test',
+      amountCents: 55000,
+      currencyCode: 'USD',
+      note: 'Bootstrap payout',
+      metadata: { provider: 'paypal' }
+    });
+
     const response = await injectRequest(app, {
       method: 'GET',
       url: '/api/me',
@@ -990,6 +1099,16 @@ describe('API integration flows', () => {
     assert.equal(body.receipts.length, 1);
     assert.equal(body.referrals.user_id, 'demo-user');
     assert.ok(Array.isArray(body.topUpOrders));
+    assert.equal(body.invoices.data.length, 1);
+    assert.equal(body.invoices.data[0].summary.amount, '1999.00');
+    assert.equal(body.invoices.data[0].summary.recipient_email, 'finance@example.test');
+    assert.equal(body.payouts.data.length, 1);
+    assert.equal(body.payouts.data[0].summary.amount, '550.00');
+    assert.equal(body.payouts.data[0].summary.receiver, 'operator@example.test');
+    assert.equal(body.financeSummary.invoice_count, 1);
+    assert.equal(body.financeSummary.payout_count, 1);
+    assert.equal(body.financeSummary.collected_cents, 199900);
+    assert.equal(body.financeSummary.pending_payout_cents, 55000);
 
     const adminSessionResponse = await injectRequest(app, {
       method: 'GET',
@@ -999,6 +1118,1202 @@ describe('API integration flows', () => {
 
     assert.equal(adminSessionResponse.status, 200);
     assert.equal(adminSessionResponse.json().user.id, 'demo-user');
+  });
+
+  test('GET /api/services/:slug/command-center requires user auth and returns service lane metrics', async () => {
+    const servicesUnauthorizedResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services'
+    });
+
+    assert.equal(servicesUnauthorizedResponse.status, 401);
+    assert.equal(servicesUnauthorizedResponse.json().code, 'USER_AUTH_REQUIRED');
+
+    const servicesResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(servicesResponse.status, 200);
+    const servicesBody = servicesResponse.json();
+    assert.ok(servicesBody.services.length > 0);
+    assert.ok(servicesBody.services.every((service) => ['active', 'sandbox'].includes(service.status)));
+    assert.ok(
+      servicesBody.services.some(
+        (service) => service.slug === 'transaction-record' && service.payment_provider === false
+      )
+    );
+    assert.ok(servicesBody.services.some((service) => service.slug === 'paypal' && service.payment_provider === true));
+    assert.equal(servicesBody.services.some((service) => service.slug === 'opay'), false);
+    assert.equal(servicesBody.services.some((service) => service.slug === 'palmpay'), false);
+
+    const serviceResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/transaction-record',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(serviceResponse.status, 200);
+    assert.equal(serviceResponse.json().service.slug, 'transaction-record');
+    assert.equal(serviceResponse.json().service.receipt_type, 'transaction-record');
+
+    const templatesResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/transaction-record/templates',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(templatesResponse.status, 200);
+    assert.equal(templatesResponse.json().service.slug, 'transaction-record');
+    assert.deepEqual(templatesResponse.json().templates, []);
+
+    const unavailableResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/palmpay',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(unavailableResponse.status, 404);
+    assert.equal(unavailableResponse.json().code, 'SERVICE_NOT_FOUND');
+
+    const unsafeServiceResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/opay',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(unsafeServiceResponse.status, 404);
+    assert.equal(unsafeServiceResponse.json().code, 'SERVICE_NOT_FOUND');
+
+    const unsafeCommandCenterResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/opay/command-center',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(unsafeCommandCenterResponse.status, 404);
+    assert.equal(unsafeCommandCenterResponse.json().code, 'SERVICE_NOT_FOUND');
+
+    const unauthorizedResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/transaction-record/command-center'
+    });
+
+    assert.equal(unauthorizedResponse.status, 401);
+    assert.equal(unauthorizedResponse.json().code, 'USER_AUTH_REQUIRED');
+
+    await receiptRepository.create({
+      userId: 'demo-user',
+      type: 'transaction-record',
+      status: 'generated',
+      title: 'Verified transaction record',
+      summary: { text: 'Verified transaction record ready' },
+      data: { details: { service: 'transaction-record', amount: '100.00' } },
+      pdfBase64: '',
+      imageDataUrl: 'data:image/png;base64,test',
+      costPoints: 10
+    });
+
+    await receiptRepository.create({
+      userId: 'demo-user',
+      type: 'email',
+      status: 'generated',
+      title: 'Binance notice',
+      summary: { text: 'Binance notification ready' },
+      data: { details: { service: 'binance' } },
+      pdfBase64: '',
+      imageDataUrl: 'data:image/png;base64,test',
+      costPoints: 10
+    });
+
+    const response = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/transaction-record/command-center',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(response.status, 200);
+    const body = response.json();
+    assert.equal(body.service.slug, 'transaction-record');
+    assert.equal(body.service.payment_provider, false);
+    assert.equal(body.activity.service_receipt_count, 1);
+    assert.equal(body.activity.compatible_receipt_count, 1);
+    assert.equal(body.wallet.available_balance_cents, 250000);
+    assert.ok(body.command_center.live_metrics.some((metric) => metric.id === 'wallet'));
+    const receiptVaultLane = body.command_center.lanes.find((lane) => lane.id === 'receipt-vault');
+    assert.ok(receiptVaultLane);
+    assert.ok(receiptVaultLane.live_metrics.length >= 1);
+
+    const laneResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/transaction-record/lanes/receipt-vault',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(laneResponse.status, 200);
+    const laneBody = laneResponse.json();
+    assert.equal(laneBody.service.slug, 'transaction-record');
+    assert.equal(laneBody.lane.id, 'receipt-vault');
+    assert.equal(laneBody.action.kind, 'vault');
+    assert.equal(laneBody.action.route, '/miniapp/vault');
+    assert.equal(laneBody.prefill, null);
+    assert.ok(
+      laneBody.readiness.some((check) => check.id === 'service-availability' && check.status === 'ready')
+    );
+    assert.equal(laneBody.activity.service_receipt_count, 1);
+    assert.equal(laneBody.activity.recent_receipts[0].title, 'Verified transaction record');
+    assert.ok(Number(laneBody.support_context.points_available) > 0);
+
+    const actionPayload = JSON.stringify({
+      source: 'miniapp',
+      intent: 'launch',
+      metadata: { entry: 'lane-detail' }
+    });
+    const actionResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/services/transaction-record/lanes/receipt-vault/actions',
+      headers: jsonHeaders(actionPayload, bearerHeaders(userTokens.demoUser)),
+      body: actionPayload
+    });
+
+    assert.equal(actionResponse.status, 201);
+    const actionBody = actionResponse.json();
+    assert.equal(actionBody.action_intent.status, 'recorded');
+    assert.equal(actionBody.action_intent.service_slug, 'transaction-record');
+    assert.equal(actionBody.action_intent.lane_id, 'receipt-vault');
+    assert.equal(actionBody.action_intent.intent, 'launch');
+    assert.equal(actionBody.action_intent.source, 'miniapp');
+    assert.equal(actionBody.action_intent.action.kind, 'vault');
+    assert.equal(actionBody.action_intent.action.route, '/miniapp/vault');
+    assert.equal(actionBody.action_intent.prefill, null);
+    assert.equal(actionBody.action_intent.audit.entity_type, 'service_lane');
+
+    const auditEntries = await auditLogRepository.findManyForEntity(
+      'service_lane',
+      'transaction-record:receipt-vault'
+    );
+    assert.ok(
+      auditEntries.some(
+        (entry) =>
+          entry.action === 'service_lane.action_intent_recorded' &&
+          entry.actorId === 'demo-user' &&
+          entry.metadata.action_intent_id === actionBody.action_intent.id &&
+          entry.metadata.source === 'miniapp' &&
+          entry.metadata.metadata.entry === 'lane-detail'
+      )
+    );
+
+    const missingLaneResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/transaction-record/lanes/not-real',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(missingLaneResponse.status, 404);
+    assert.equal(missingLaneResponse.json().code, 'SERVICE_LANE_NOT_FOUND');
+
+    const missingResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/services/missing-service/command-center',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(missingResponse.status, 404);
+    assert.equal(missingResponse.json().code, 'SERVICE_NOT_FOUND');
+
+    const profileBeforeCorruption = await profileRepository.findByUserId('demo-user');
+    await db.run('UPDATE profiles SET points = ? WHERE user_id = ?', [profileBeforeCorruption.points - 1, 'demo-user']);
+
+    try {
+      const outOfBalanceResponse = await injectRequest(app, {
+        method: 'GET',
+        url: '/api/services/transaction-record/command-center',
+        headers: bearerHeaders(userTokens.demoUser)
+      });
+
+      assert.equal(outOfBalanceResponse.status, 409);
+      assert.equal(outOfBalanceResponse.json().code, 'POINT_LEDGER_OUT_OF_BALANCE');
+    } finally {
+      await db.run('UPDATE profiles SET points = ? WHERE user_id = ?', [profileBeforeCorruption.points, 'demo-user']);
+    }
+  });
+
+  test('order endpoints preflight, create idempotent queued orders, and cancel reservations', async () => {
+    const unauthorizedPayload = JSON.stringify({});
+    const unauthorizedResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders/preflight',
+      headers: jsonHeaders(unauthorizedPayload),
+      body: unauthorizedPayload
+    });
+
+    assert.equal(unauthorizedResponse.status, 401);
+    assert.equal(unauthorizedResponse.json().code, 'USER_AUTH_REQUIRED');
+
+    const unsafePreflightPayload = JSON.stringify({ serviceSlug: 'opay', input: {} });
+    const unsafePreflightResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders/preflight',
+      headers: jsonHeaders(unsafePreflightPayload, bearerHeaders(userTokens.demoUser)),
+      body: unsafePreflightPayload
+    });
+
+    assert.equal(unsafePreflightResponse.status, 404);
+    assert.equal(unsafePreflightResponse.json().code, 'SERVICE_NOT_FOUND');
+
+    await setPointBalance('demo-user', 100);
+
+    const service = await serviceRepository.findAvailableBySlug('transaction-record');
+    const template = await serviceTemplateRepository.upsert({
+      serviceId: service.id,
+      templateKey: 'order-standard',
+      title: 'Standard Transaction Record Order',
+      status: 'active',
+      receiptType: 'transaction-record',
+      costPoints: 25
+    });
+
+    const preflightPayload = JSON.stringify({
+      serviceSlug: 'transaction-record',
+      templateId: 'order-standard',
+      input: {
+        reference: 'OPAY-ORDER-001'
+      }
+    });
+    const preflightResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders/preflight',
+      headers: jsonHeaders(preflightPayload, bearerHeaders(userTokens.demoUser)),
+      body: preflightPayload
+    });
+
+    assert.equal(preflightResponse.status, 200);
+    const preflightBody = preflightResponse.json();
+    assert.equal(preflightBody.ready, true);
+    assert.equal(preflightBody.status, 'preflight');
+    assert.equal(preflightBody.point_cost, 25);
+    assert.equal(preflightBody.available_points, 100);
+    assert.equal(preflightBody.service.slug, 'transaction-record');
+    assert.equal(preflightBody.template.template_key, 'order-standard');
+    assert.ok(preflightBody.idempotency_key.startsWith('order:'));
+
+    const createPayload = JSON.stringify({
+      serviceSlug: 'transaction-record',
+      templateId: template.templateKey,
+      input: {
+        reference: 'OPAY-ORDER-001'
+      },
+      preflightAccepted: true
+    });
+    const createResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        createPayload,
+        bearerHeaders(userTokens.demoUser, {
+          'idempotency-key': 'order-integration-001'
+        })
+      ),
+      body: createPayload
+    });
+
+    assert.equal(createResponse.status, 201);
+    const createBody = createResponse.json();
+    assert.equal(createBody.idempotent, false);
+    assert.equal(createBody.order.status, 'queued');
+    assert.equal(createBody.order.queue_status, 'dispatch_pending');
+    assert.equal(createBody.order.point_cost, 25);
+    assert.ok(createBody.order.point_reservation_id);
+
+    const profileAfterCreate = await profileRepository.findByUserId('demo-user');
+    assert.equal(profileAfterCreate.points, 75);
+
+    const reservation = await pointReservationRepository.findById(createBody.order.point_reservation_id);
+    assert.equal(reservation.status, 'RESERVED');
+    assert.equal(reservation.referenceType, 'ORDER');
+    assert.equal(reservation.referenceId, createBody.order.id);
+
+    let reservationEntries = await db.all(
+      'SELECT * FROM points_transactions WHERE reference_type = ? AND reference_id = ? ORDER BY created_at ASC',
+      ['ORDER', createBody.order.id]
+    );
+    assert.equal(reservationEntries.length, 1);
+    assert.equal(reservationEntries[0].type, 'POINT_RESERVATION_HOLD');
+    assert.equal(reservationEntries[0].amount, -25);
+    assert.equal(
+      reservationEntries[0].entry_key,
+      `point-reservation:${createBody.order.point_reservation_id}:hold`
+    );
+
+    const repeatResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        createPayload,
+        bearerHeaders(userTokens.demoUser, {
+          'idempotency-key': 'order-integration-001'
+        })
+      ),
+      body: createPayload
+    });
+
+    assert.equal(repeatResponse.status, 200);
+    assert.equal(repeatResponse.json().idempotent, true);
+    assert.equal(repeatResponse.json().order.id, createBody.order.id);
+
+    let idempotencyRecord = await db.get(
+      `
+        SELECT *
+        FROM idempotency_records
+        WHERE user_id = ? AND operation = ? AND idempotency_key = ?
+      `,
+      ['demo-user', 'orders.create', 'order-integration-001']
+    );
+    assert.match(idempotencyRecord.request_hash, /^[a-f0-9]{64}$/);
+    assert.equal(idempotencyRecord.response_status, 201);
+    assert.equal(JSON.parse(idempotencyRecord.response_payload).order.id, createBody.order.id);
+
+    const changedCreatePayload = JSON.stringify({
+      serviceSlug: 'transaction-record',
+      templateId: template.templateKey,
+      input: {
+        reference: 'OPAY-ORDER-CHANGED'
+      },
+      preflightAccepted: true
+    });
+    const changedReplayResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        changedCreatePayload,
+        bearerHeaders(userTokens.demoUser, {
+          'idempotency-key': 'order-integration-001'
+        })
+      ),
+      body: changedCreatePayload
+    });
+
+    assert.equal(changedReplayResponse.status, 409);
+    assert.equal(changedReplayResponse.json().code, 'IDEMPOTENCY_KEY_REUSED');
+
+    const crossOwnerReplayResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        createPayload,
+        bearerHeaders(userTokens.secondaryUser, {
+          'idempotency-key': 'order-integration-001'
+        })
+      ),
+      body: createPayload
+    });
+
+    assert.equal(crossOwnerReplayResponse.status, 409);
+    assert.equal(crossOwnerReplayResponse.json().code, 'IDEMPOTENCY_KEY_CONFLICT');
+
+    await db.run(
+      'DELETE FROM idempotency_records WHERE user_id = ? AND operation = ? AND idempotency_key = ?',
+      ['demo-user', 'orders.create', 'order-integration-001']
+    );
+
+    const legacyReplayResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        createPayload,
+        bearerHeaders(userTokens.demoUser, {
+          'idempotency-key': 'order-integration-001'
+        })
+      ),
+      body: createPayload
+    });
+
+    assert.equal(legacyReplayResponse.status, 200);
+    assert.equal(legacyReplayResponse.json().idempotent, true);
+    assert.equal(legacyReplayResponse.json().order.id, createBody.order.id);
+
+    idempotencyRecord = await db.get(
+      `
+        SELECT *
+        FROM idempotency_records
+        WHERE user_id = ? AND operation = ? AND idempotency_key = ?
+      `,
+      ['demo-user', 'orders.create', 'order-integration-001']
+    );
+    assert.match(idempotencyRecord.request_hash, /^[a-f0-9]{64}$/);
+    assert.equal(idempotencyRecord.response_status, 200);
+    assert.equal(JSON.parse(idempotencyRecord.response_payload).order.id, createBody.order.id);
+
+    const profileAfterReplays = await profileRepository.findByUserId('demo-user');
+    assert.equal(profileAfterReplays.points, 75);
+
+    reservationEntries = await db.all(
+      'SELECT * FROM points_transactions WHERE reference_type = ? AND reference_id = ?',
+      ['ORDER', createBody.order.id]
+    );
+    assert.equal(reservationEntries.length, 1);
+
+    const orderRows = await db.all('SELECT id FROM orders WHERE idempotency_key = ?', ['order-integration-001']);
+    assert.equal(orderRows.length, 1);
+
+    const listResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/orders?status=queued',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(listResponse.status, 200);
+    assert.ok(listResponse.json().orders.some((order) => order.id === createBody.order.id));
+
+    const detailResponse = await injectRequest(app, {
+      method: 'GET',
+      url: `/api/orders/${createBody.order.id}`,
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+
+    assert.equal(detailResponse.status, 200);
+    const detailBody = detailResponse.json();
+    assert.equal(detailBody.order.id, createBody.order.id);
+    assert.ok(detailBody.events.some((event) => event.next_status === 'queued'));
+
+    const persistedEvents = await orderEventRepository.findManyByOrderId(createBody.order.id);
+    assert.ok(persistedEvents.length >= 4);
+
+    const cancelPayload = JSON.stringify({
+      reason: 'user changed scope'
+    });
+    const cancelResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/orders/${createBody.order.id}/cancel`,
+      headers: jsonHeaders(cancelPayload, bearerHeaders(userTokens.demoUser)),
+      body: cancelPayload
+    });
+
+    assert.equal(cancelResponse.status, 200);
+    assert.equal(cancelResponse.json().order.status, 'cancelled');
+    assert.equal(cancelResponse.json().order.queue_status, 'unavailable');
+
+    const profileAfterCancel = await profileRepository.findByUserId('demo-user');
+    assert.equal(profileAfterCancel.points, 100);
+
+    const releasedReservation = await pointReservationRepository.findById(createBody.order.point_reservation_id);
+    assert.equal(releasedReservation.status, 'RELEASED');
+
+    reservationEntries = await db.all(
+      'SELECT * FROM points_transactions WHERE reference_type = ? AND reference_id = ? ORDER BY created_at ASC',
+      ['ORDER', createBody.order.id]
+    );
+    assert.equal(reservationEntries.length, 2);
+    assert.deepEqual(reservationEntries.map((entry) => entry.amount), [-25, 25]);
+    assert.equal(reservationEntries[1].type, 'POINT_RESERVATION_RELEASE');
+    assert.equal(
+      reservationEntries[1].entry_key,
+      `point-reservation:${createBody.order.point_reservation_id}:release`
+    );
+  });
+
+  test('order endpoints enforce catalogue access and service/template input schemas', async () => {
+    const restrictedService = await serviceRepository.upsert({
+      slug: 'admin-order-schema',
+      title: 'Admin Order Schema',
+      category: 'testing',
+      pointPrice: 0,
+      status: 'active',
+      inputSchema: {
+        type: 'object',
+        maxProperties: 0
+      },
+      permissions: ['role:ADMIN']
+    });
+
+    const restrictedPayload = JSON.stringify({
+      serviceSlug: restrictedService.slug,
+      input: {}
+    });
+    const userRestrictedResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders/preflight',
+      headers: jsonHeaders(restrictedPayload, bearerHeaders(userTokens.demoUser)),
+      body: restrictedPayload
+    });
+    assert.equal(userRestrictedResponse.status, 404);
+    assert.equal(userRestrictedResponse.json().code, 'SERVICE_NOT_FOUND');
+
+    const adminRestrictedResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders/preflight',
+      headers: jsonHeaders(restrictedPayload, bearerHeaders(adminToken)),
+      body: restrictedPayload
+    });
+    assert.equal(adminRestrictedResponse.status, 200);
+    assert.equal(adminRestrictedResponse.json().ready, true);
+
+    const schemaService = await serviceRepository.upsert({
+      slug: 'validated-order-schema',
+      title: 'Validated Order Schema',
+      category: 'testing',
+      pointPrice: 0,
+      status: 'active',
+      inputSchema: {
+        type: 'object',
+        required: ['reference'],
+        properties: {
+          reference: { type: 'string', minLength: 3 }
+        }
+      },
+      permissions: ['authenticated']
+    });
+    await serviceTemplateRepository.upsert({
+      serviceId: schemaService.id,
+      templateKey: 'validated-template',
+      title: 'Validated Template',
+      status: 'active',
+      costPoints: 0,
+      inputSchema: {
+        type: 'object',
+        required: ['amount', 'recipient'],
+        properties: {
+          amount: { type: 'integer', minimum: 1 },
+          recipient: { type: 'string', format: 'email' }
+        }
+      }
+    });
+
+    const missingServiceFieldPayload = JSON.stringify({
+      serviceSlug: schemaService.slug,
+      templateId: 'validated-template',
+      input: {
+        amount: 10,
+        recipient: 'finance@example.test'
+      }
+    });
+    const missingServiceFieldResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders/preflight',
+      headers: jsonHeaders(missingServiceFieldPayload, bearerHeaders(userTokens.demoUser)),
+      body: missingServiceFieldPayload
+    });
+    assert.equal(missingServiceFieldResponse.status, 422);
+    assert.equal(missingServiceFieldResponse.json().code, 'ORDER_INPUT_INVALID');
+    assert.equal(missingServiceFieldResponse.json().details.issues[0].schema_scope, 'service');
+    assert.equal(missingServiceFieldResponse.json().details.issues[0].path, '/reference');
+
+    const invalidTemplatePayload = JSON.stringify({
+      serviceSlug: schemaService.slug,
+      templateId: 'validated-template',
+      input: {
+        reference: 'ORDER-VALIDATION-001',
+        amount: 0,
+        recipient: 'not-an-email'
+      }
+    });
+    const invalidTemplateResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        invalidTemplatePayload,
+        bearerHeaders(userTokens.demoUser, {
+          'idempotency-key': 'order-schema-invalid-001'
+        })
+      ),
+      body: invalidTemplatePayload
+    });
+    assert.equal(invalidTemplateResponse.status, 422);
+    assert.equal(invalidTemplateResponse.json().code, 'ORDER_INPUT_INVALID');
+    assert.ok(
+      invalidTemplateResponse.json().details.issues.every(
+        (issue) => issue.schema_scope === 'template'
+      )
+    );
+    assert.equal(
+      JSON.stringify(invalidTemplateResponse.json().details).includes('not-an-email'),
+      false
+    );
+    const rejectedOrder = await db.get(
+      'SELECT id FROM orders WHERE idempotency_key = ?',
+      ['order-schema-invalid-001']
+    );
+    assert.equal(rejectedOrder, null);
+
+    const validPayload = JSON.stringify({
+      serviceSlug: schemaService.slug,
+      templateId: 'validated-template',
+      input: {
+        reference: 'ORDER-VALIDATION-002',
+        amount: 10,
+        recipient: 'finance@example.test'
+      }
+    });
+    const validPreflightResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders/preflight',
+      headers: jsonHeaders(validPayload, bearerHeaders(userTokens.demoUser)),
+      body: validPayload
+    });
+    assert.equal(validPreflightResponse.status, 200);
+    assert.equal(validPreflightResponse.json().ready, true);
+
+    const validCreateResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        validPayload,
+        bearerHeaders(userTokens.demoUser, {
+          'idempotency-key': 'order-schema-valid-001'
+        })
+      ),
+      body: validPayload
+    });
+    assert.equal(validCreateResponse.status, 201);
+    assert.deepEqual(validCreateResponse.json().order.input, {
+      reference: 'ORDER-VALIDATION-002',
+      amount: 10,
+      recipient: 'finance@example.test'
+    });
+  });
+
+  test('order endpoints report insufficient points without creating an order', async () => {
+    await setPointBalance('demo-user', 1);
+
+    const service = await serviceRepository.findAvailableBySlug('transaction-record');
+    await serviceTemplateRepository.upsert({
+      serviceId: service.id,
+      templateKey: 'order-expensive',
+      title: 'Expensive Transaction Record Order',
+      status: 'active',
+      receiptType: 'transaction-record',
+      costPoints: 25
+    });
+
+    const payload = JSON.stringify({
+      serviceSlug: 'transaction-record',
+      templateId: 'order-expensive',
+      input: {
+        reference: 'OPAY-ORDER-002'
+      }
+    });
+    const preflightResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders/preflight',
+      headers: jsonHeaders(payload, bearerHeaders(userTokens.demoUser)),
+      body: payload
+    });
+
+    assert.equal(preflightResponse.status, 200);
+    assert.equal(preflightResponse.json().ready, false);
+    assert.equal(preflightResponse.json().status, 'insufficient_points');
+    assert.equal(preflightResponse.json().requirements.points_shortfall, 24);
+
+    const createResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        payload,
+        bearerHeaders(userTokens.demoUser, {
+          'idempotency-key': 'order-insufficient-001'
+        })
+      ),
+      body: payload
+    });
+
+    assert.equal(createResponse.status, 400);
+    assert.equal(createResponse.json().code, 'INSUFFICIENT_POINTS');
+
+    const persistedOrder = await db.get('SELECT id FROM orders WHERE idempotency_key = ?', ['order-insufficient-001']);
+    assert.equal(persistedOrder, null);
+  });
+
+  test('order dispatcher processes queued orders through the worker state machine', async () => {
+    await setPointBalance('demo-user', 100);
+
+    const service = await serviceRepository.findAvailableBySlug('transaction-record');
+    const template = await serviceTemplateRepository.upsert({
+      serviceId: service.id,
+      templateKey: 'order-worker-standard',
+      title: 'Worker Transaction Record Order',
+      status: 'active',
+      receiptType: 'transaction-record',
+      costPoints: 10
+    });
+
+    const payload = JSON.stringify({
+      serviceSlug: 'transaction-record',
+      templateId: template.templateKey,
+      input: {
+        reference: 'OPAY-WORKER-001'
+      },
+      preflightAccepted: true
+    });
+    const createResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        payload,
+        bearerHeaders(userTokens.demoUser, {
+          'idempotency-key': 'order-worker-001'
+        })
+      ),
+      body: payload
+    });
+
+    assert.equal(createResponse.status, 201);
+    const createdOrder = createResponse.json().order;
+    assert.equal(createdOrder.status, 'queued');
+    assert.equal(createdOrder.queue_status, 'dispatch_pending');
+
+    const dispatchResult = await dispatchOrderProcessing(createdOrder.id);
+
+    assert.equal(dispatchResult.order.id, createdOrder.id);
+    assert.equal(dispatchResult.order.status, 'manual_review');
+    assert.equal(dispatchResult.order.queue_status, 'unavailable');
+    assert.equal(dispatchResult.order.attempt_count, 1);
+    assert.equal(dispatchResult.order.failure_code, 'ORDER_HANDLER_UNAVAILABLE');
+    assert.equal(dispatchResult.order.output.handled, false);
+
+    const events = await orderEventRepository.findManyByOrderId(createdOrder.id);
+    assert.ok(events.some((event) => event.next_status === 'processing'));
+    assert.ok(events.some((event) => event.next_status === 'manual_review'));
+
+    const reservation = await pointReservationRepository.findById(createdOrder.point_reservation_id);
+    assert.equal(reservation.status, 'RESERVED');
+  });
+
+  test('completed order processing commits reserved points exactly once', async () => {
+    await setPointBalance('demo-user', 100);
+
+    const service = await serviceRepository.findAvailableBySlug('transaction-record');
+    const template = await serviceTemplateRepository.upsert({
+      serviceId: service.id,
+      templateKey: 'order-completion',
+      title: 'Completion Order',
+      status: 'active',
+      receiptType: 'transaction-record',
+      costPoints: 20
+    });
+    const payload = JSON.stringify({
+      serviceSlug: 'transaction-record',
+      templateId: template.templateKey,
+      input: { reference: 'OPAY-COMPLETE-001' },
+      preflightAccepted: true
+    });
+    const createResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        payload,
+        bearerHeaders(userTokens.demoUser, { 'idempotency-key': 'order-completion-001' })
+      ),
+      body: payload
+    });
+    const createdOrder = createResponse.json().order;
+
+    const result = await orderService.processQueuedOrder({
+      orderId: createdOrder.id,
+      jobId: 'test-order-completion',
+      executor: async () => ({
+        status: 'completed',
+        output: { asset_id: 'asset-complete-001' },
+        reason: 'asset_generated'
+      })
+    });
+
+    assert.equal(result.order.status, 'completed');
+    assert.equal(result.order.attempt_count, 1);
+    assert.equal(result.order.output.asset_id, 'asset-complete-001');
+    assert.ok(result.order.completed_at);
+
+    const profile = await profileRepository.findByUserId('demo-user');
+    assert.equal(profile.points, 80);
+
+    const reservation = await pointReservationRepository.findById(createdOrder.point_reservation_id);
+    assert.equal(reservation.status, 'COMMITTED');
+    assert.ok(reservation.committedAt);
+
+    let executorCalled = false;
+    const repeated = await orderService.processQueuedOrder({
+      orderId: createdOrder.id,
+      executor: async () => {
+        executorCalled = true;
+        throw new Error('terminal orders must not execute again');
+      }
+    });
+    assert.equal(repeated.skipped, true);
+    assert.equal(executorCalled, false);
+
+    const pointEntries = await db.all(
+      'SELECT type, amount FROM points_transactions WHERE reference_type = ? AND reference_id = ?',
+      ['ORDER', createdOrder.id]
+    );
+    assert.equal(pointEntries.length, 2);
+    assert.deepEqual(
+      new Map(pointEntries.map((entry) => [entry.type, entry.amount])),
+      new Map([
+        ['POINT_RESERVATION_HOLD', -20],
+        ['POINT_RESERVATION_COMMIT', 0]
+      ])
+    );
+  });
+
+  test('failed order processing releases points and retry commits a fresh reservation', async () => {
+    await setPointBalance('demo-user', 100);
+
+    const service = await serviceRepository.findAvailableBySlug('transaction-record');
+    const template = await serviceTemplateRepository.upsert({
+      serviceId: service.id,
+      templateKey: 'order-failure-retry',
+      title: 'Failure Retry Order',
+      status: 'active',
+      receiptType: 'transaction-record',
+      costPoints: 30
+    });
+    const payload = JSON.stringify({
+      serviceSlug: 'transaction-record',
+      templateId: template.templateKey,
+      input: { reference: 'OPAY-FAIL-RETRY-001' },
+      preflightAccepted: true
+    });
+    const createResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/orders',
+      headers: jsonHeaders(
+        payload,
+        bearerHeaders(userTokens.demoUser, { 'idempotency-key': 'order-failure-retry-001' })
+      ),
+      body: payload
+    });
+    const createdOrder = createResponse.json().order;
+
+    const failed = await orderService.processQueuedOrder({
+      orderId: createdOrder.id,
+      jobId: 'test-order-failure',
+      executor: async () => ({
+        status: 'failed',
+        failureCode: 'GENERATION_REJECTED',
+        failureMessage: 'Generation input was rejected.',
+        reason: 'generation_rejected'
+      })
+    });
+    assert.equal(failed.order.status, 'failed');
+    assert.equal(failed.order.attempt_count, 1);
+    assert.equal(failed.order.failure_code, 'GENERATION_REJECTED');
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 100);
+    assert.equal(
+      (await pointReservationRepository.findById(createdOrder.point_reservation_id)).status,
+      'RELEASED'
+    );
+
+    const retryPayload = JSON.stringify({ reason: 'corrected generation input' });
+    const retryResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/orders/${createdOrder.id}/retry`,
+      headers: jsonHeaders(retryPayload, bearerHeaders(userTokens.demoUser)),
+      body: retryPayload
+    });
+    assert.equal(retryResponse.status, 200);
+    const retriedOrder = retryResponse.json().order;
+    assert.equal(retriedOrder.status, 'queued');
+    assert.equal(retriedOrder.attempt_count, 1);
+    assert.equal(retriedOrder.metadata.dispatchGeneration, 2);
+    assert.notEqual(retriedOrder.point_reservation_id, createdOrder.point_reservation_id);
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 70);
+
+    const retryReservation = await pointReservationRepository.findById(retriedOrder.point_reservation_id);
+    assert.equal(retryReservation.status, 'RESERVED');
+    assert.equal(retryReservation.reservationKey, `order:${createdOrder.id}:points:reservation:2`);
+
+    const completed = await orderService.processQueuedOrder({
+      orderId: createdOrder.id,
+      dispatchGeneration: retriedOrder.metadata.dispatchGeneration,
+      jobId: 'test-order-retry-completion',
+      executor: async () => ({
+        status: 'completed',
+        output: { asset_id: 'asset-retry-001' },
+        reason: 'retry_completed'
+      })
+    });
+    assert.equal(completed.order.status, 'completed');
+    assert.equal(completed.order.attempt_count, 2);
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 70);
+    assert.equal(
+      (await pointReservationRepository.findById(retriedOrder.point_reservation_id)).status,
+      'COMMITTED'
+    );
+
+    const reservations = await pointReservationRepository.findByReference('ORDER', createdOrder.id);
+    assert.equal(reservations.length, 2);
+    assert.deepEqual(new Set(reservations.map((reservation) => reservation.status)), new Set(['RELEASED', 'COMMITTED']));
+
+    const pointEntries = await db.all(
+      'SELECT type, amount FROM points_transactions WHERE reference_type = ? AND reference_id = ?',
+      ['ORDER', createdOrder.id]
+    );
+    assert.equal(pointEntries.length, 4);
+    assert.equal(pointEntries.reduce((total, entry) => total + entry.amount, 0), -30);
+  });
+
+  test('stale order jobs cannot execute, fail, or finalize a newer retry generation', async () => {
+    await setPointBalance('demo-user', 100);
+
+    const service = await serviceRepository.findAvailableBySlug('transaction-record');
+    const template = await serviceTemplateRepository.upsert({
+      serviceId: service.id,
+      templateKey: 'order-stale-dispatch',
+      title: 'Stale Dispatch Order',
+      status: 'active',
+      receiptType: 'transaction-record',
+      costPoints: 25
+    });
+    const created = await orderService.createOrder({
+      userId: 'demo-user',
+      idempotencyKey: 'order-stale-dispatch-001',
+      serviceSlug: 'transaction-record',
+      templateId: template.templateKey,
+      input: { reference: 'OPAY-STALE-DISPATCH-001' },
+      preflightAccepted: true
+    });
+
+    let signalFirstExecutorStarted;
+    let releaseFirstExecutor;
+    const firstExecutorStarted = new Promise((resolve) => {
+      signalFirstExecutorStarted = resolve;
+    });
+    const firstExecutorRelease = new Promise((resolve) => {
+      releaseFirstExecutor = resolve;
+    });
+    const firstProcessing = orderService.processQueuedOrder({
+      orderId: created.order.id,
+      dispatchGeneration: 1,
+      jobId: 'stale-dispatch-generation-1',
+      executor: async () => {
+        signalFirstExecutorStarted();
+        await firstExecutorRelease;
+        return {
+          status: 'completed',
+          output: { asset_id: 'stale-asset' },
+          reason: 'stale_executor_completed'
+        };
+      }
+    });
+    await firstExecutorStarted;
+
+    const failedFirstGeneration = await orderService.markOrderFailed({
+      orderId: created.order.id,
+      dispatchGeneration: 1,
+      failureCode: 'ORDER_JOB_EXHAUSTED',
+      failureMessage: 'Generation one queue attempts exhausted.',
+      reason: 'worker_attempts_exhausted'
+    });
+    assert.equal(failedFirstGeneration.order.status, 'failed');
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 100);
+
+    const retried = await orderService.retryOrder({
+      userId: 'demo-user',
+      orderId: created.order.id,
+      reason: 'retry after exhausted worker'
+    });
+    assert.equal(retried.order.status, 'queued');
+    assert.equal(retried.order.metadata.dispatchGeneration, 2);
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 75);
+
+    const staleFailure = await orderService.markOrderFailed({
+      orderId: created.order.id,
+      dispatchGeneration: 1,
+      reason: 'late_generation_one_failure'
+    });
+    assert.equal(staleFailure.skipped, true);
+    assert.equal(staleFailure.skipReason, 'stale_dispatch');
+    assert.equal(staleFailure.order.status, 'queued');
+
+    let staleExecutorCalled = false;
+    const staleStart = await orderService.processQueuedOrder({
+      orderId: created.order.id,
+      dispatchGeneration: 1,
+      executor: async () => {
+        staleExecutorCalled = true;
+        return { status: 'failed' };
+      }
+    });
+    assert.equal(staleStart.skipped, true);
+    assert.equal(staleStart.skipReason, 'stale_dispatch');
+    assert.equal(staleExecutorCalled, false);
+
+    let signalSecondExecutorStarted;
+    let releaseSecondExecutor;
+    const secondExecutorStarted = new Promise((resolve) => {
+      signalSecondExecutorStarted = resolve;
+    });
+    const secondExecutorRelease = new Promise((resolve) => {
+      releaseSecondExecutor = resolve;
+    });
+    const secondProcessing = orderService.processQueuedOrder({
+      orderId: created.order.id,
+      dispatchGeneration: 2,
+      jobId: 'current-dispatch-generation-2',
+      executor: async () => {
+        signalSecondExecutorStarted();
+        await secondExecutorRelease;
+        return {
+          status: 'completed',
+          output: { asset_id: 'current-asset' },
+          reason: 'current_executor_completed'
+        };
+      }
+    });
+    await secondExecutorStarted;
+
+    releaseFirstExecutor();
+    const staleFinalization = await firstProcessing;
+    assert.equal(staleFinalization.skipped, true);
+    assert.equal(staleFinalization.skipReason, 'stale_dispatch');
+    assert.equal(staleFinalization.order.status, 'processing');
+    assert.equal(staleFinalization.order.metadata.dispatchGeneration, 2);
+
+    const retryReservation = await pointReservationRepository.findById(
+      retried.order.point_reservation_id
+    );
+    assert.equal(retryReservation.status, 'RESERVED');
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 75);
+
+    releaseSecondExecutor();
+    const completed = await secondProcessing;
+    assert.equal(completed.order.status, 'completed');
+    assert.equal(completed.order.attempt_count, 2);
+    assert.equal(completed.order.output.asset_id, 'current-asset');
+    assert.equal(
+      (await pointReservationRepository.findById(retried.order.point_reservation_id)).status,
+      'COMMITTED'
+    );
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 75);
+  });
+
+  test('exhausted queued jobs release each retry hold without consuming a processing attempt', async () => {
+    await setPointBalance('demo-user', 100);
+
+    const service = await serviceRepository.findAvailableBySlug('transaction-record');
+    const template = await serviceTemplateRepository.upsert({
+      serviceId: service.id,
+      templateKey: 'order-queued-failure',
+      title: 'Queued Failure Order',
+      status: 'active',
+      receiptType: 'transaction-record',
+      costPoints: 15
+    });
+    const created = await orderService.createOrder({
+      userId: 'demo-user',
+      idempotencyKey: 'order-queued-failure-001',
+      serviceSlug: 'transaction-record',
+      templateId: template.templateKey,
+      input: { reference: 'OPAY-QUEUED-FAILURE-001' },
+      preflightAccepted: true
+    });
+
+    const firstFailure = await orderService.markOrderFailed({
+      orderId: created.order.id,
+      failureCode: 'ORDER_JOB_EXHAUSTED',
+      failureMessage: 'Queue attempts exhausted.',
+      reason: 'worker_attempts_exhausted'
+    });
+    assert.equal(firstFailure.order.status, 'failed');
+    assert.equal(firstFailure.order.attempt_count, 0);
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 100);
+
+    const firstRetry = await orderService.retryOrder({
+      userId: 'demo-user',
+      orderId: created.order.id,
+      reason: 'retry dispatch'
+    });
+    assert.equal(firstRetry.order.attempt_count, 0);
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 85);
+
+    await orderService.markOrderFailed({
+      orderId: created.order.id,
+      dispatchGeneration: firstRetry.order.metadata.dispatchGeneration,
+      failureCode: 'ORDER_JOB_EXHAUSTED',
+      failureMessage: 'Queue attempts exhausted again.',
+      reason: 'worker_attempts_exhausted'
+    });
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 100);
+
+    const secondRetry = await orderService.retryOrder({
+      userId: 'demo-user',
+      orderId: created.order.id,
+      reason: 'retry dispatch again'
+    });
+    assert.equal(secondRetry.order.attempt_count, 0);
+    assert.notEqual(secondRetry.order.point_reservation_id, firstRetry.order.point_reservation_id);
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 85);
+
+    const reservations = await pointReservationRepository.findByReference('ORDER', created.order.id);
+    assert.equal(reservations.length, 3);
+    assert.deepEqual(
+      new Set(reservations.map((reservation) => reservation.reservationKey)),
+      new Set([
+        `order:${created.order.id}:points`,
+        `order:${created.order.id}:points:reservation:2`,
+        `order:${created.order.id}:points:reservation:3`
+      ])
+    );
+    assert.equal(reservations.filter((reservation) => reservation.status === 'RESERVED').length, 1);
+    assert.equal(reservations.filter((reservation) => reservation.status === 'RELEASED').length, 2);
+  });
+
+  test('order dispatcher recovers dispatch-pending orders in bounded batches', async () => {
+    await setPointBalance('demo-user', 100);
+    const service = await serviceRepository.findBySlug('transaction-record');
+    const template = await serviceTemplateRepository.upsert({
+      serviceId: service.id,
+      templateKey: 'order-recovery',
+      title: 'Recovery Transaction Record Order',
+      status: 'active',
+      receiptType: 'transaction-record',
+      costPoints: 5
+    });
+
+    const createdOrderIds = [];
+    for (const suffix of ['a', 'b']) {
+      const payload = JSON.stringify({
+        serviceSlug: 'transaction-record',
+        templateId: template.templateKey,
+        input: {
+          reference: `OPAY-RECOVERY-${suffix.toUpperCase()}`
+        },
+        preflightAccepted: true
+      });
+      const response = await injectRequest(app, {
+        method: 'POST',
+        url: '/api/orders',
+        headers: jsonHeaders(
+          payload,
+          bearerHeaders(userTokens.demoUser, {
+            'idempotency-key': `order-recovery-${suffix}`
+          })
+        ),
+        body: payload
+      });
+
+      assert.equal(response.status, 201);
+      assert.equal(response.json().order.queue_status, 'dispatch_pending');
+      createdOrderIds.push(response.json().order.id);
+    }
+
+    const recoveryResult = await dispatchPendingOrders({ limit: 1 });
+
+    assert.equal(recoveryResult.scanned, 1);
+    assert.equal(recoveryResult.dispatched, 1);
+    assert.equal(recoveryResult.failed, 0);
+    assert.ok(createdOrderIds.includes(recoveryResult.results[0].orderId));
+
+    const processedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [recoveryResult.results[0].orderId]);
+    assert.equal(processedOrder.status, 'manual_review');
+    assert.equal(processedOrder.queue_status, 'unavailable');
+    assert.equal(processedOrder.failure_code, 'ORDER_HANDLER_UNAVAILABLE');
+
+    const remainingPending = await db.all(
+      "SELECT id FROM orders WHERE status = 'queued' AND queue_status = 'dispatch_pending' AND id IN (?, ?)",
+      createdOrderIds
+    );
+    assert.equal(remainingPending.length, 1);
   });
 
   test('top-up order endpoints persist user funding orders and require admin completion for point credit', async () => {
@@ -1093,6 +2408,8 @@ describe('API integration flows', () => {
     assert.equal(response.status, 200);
     const body = response.json();
     assert.equal(body.user.displayName, 'Renamed Demo User');
+    assert.equal(body.user.points, 500);
+    assert.equal(body.user.profile.points, 500);
 
     const profile = await profileRepository.findByUserId('demo-user');
     assert.equal(profile.name, 'Renamed Demo User');
@@ -1101,7 +2418,7 @@ describe('API integration flows', () => {
     assert.equal(user.displayName, 'Renamed Demo User');
   });
 
-  test('POST /api/user/me/password rotates account credentials for authenticated users', async () => {
+  test('legacy email/password account endpoints are not exposed for mini app users', async () => {
     const registerPayload = JSON.stringify({
       email: 'password-rotate@example.com',
       password: 'strongpassword123',
@@ -1116,8 +2433,7 @@ describe('API integration flows', () => {
       body: registerPayload
     });
 
-    assert.equal(registerResponse.status, 201);
-    const registerBody = registerResponse.json();
+    assert.equal(registerResponse.status, 404);
 
     const passwordPayload = JSON.stringify({
       newPassword: 'newstrongpassword456'
@@ -1126,26 +2442,11 @@ describe('API integration flows', () => {
     const passwordResponse = await injectRequest(app, {
       method: 'POST',
       url: '/api/user/me/password',
-      headers: jsonHeaders(passwordPayload, bearerHeaders(registerBody.token)),
+      headers: jsonHeaders(passwordPayload, bearerHeaders(userTokens.demoUser)),
       body: passwordPayload
     });
 
-    assert.equal(passwordResponse.status, 200);
-    assert.equal(passwordResponse.json().password_updated, true);
-
-    const oldLoginPayload = JSON.stringify({
-      email: 'password-rotate@example.com',
-      password: 'strongpassword123'
-    });
-
-    const oldLoginResponse = await injectRequest(app, {
-      method: 'POST',
-      url: '/api/auth/login',
-      headers: jsonHeaders(oldLoginPayload),
-      body: oldLoginPayload
-    });
-
-    assert.equal(oldLoginResponse.status, 401);
+    assert.equal(passwordResponse.status, 404);
 
     const newLoginPayload = JSON.stringify({
       email: 'password-rotate@example.com',
@@ -1159,53 +2460,46 @@ describe('API integration flows', () => {
       body: newLoginPayload
     });
 
-    assert.equal(newLoginResponse.status, 200);
-    assert.equal(newLoginResponse.json().user.email, 'password-rotate@example.com');
+    assert.equal(newLoginResponse.status, 404);
   });
 
   test('DELETE /api/user/me removes the authenticated account', async () => {
-    const registerPayload = JSON.stringify({
-      email: 'delete-account@example.com',
-      password: 'strongpassword123',
-      name: 'Delete Me',
-      countryCode: 'US'
+    const initData = createTelegramMiniAppInitData({
+      user: {
+        id: 77001,
+        first_name: 'Delete',
+        last_name: 'Me',
+        username: 'delete_me'
+      },
+      startParam: 'profile'
     });
-
-    const registerResponse = await injectRequest(app, {
+    const authPayload = JSON.stringify({
+      initData,
+      startParam: 'profile'
+    });
+    const authResponse = await injectRequest(app, {
       method: 'POST',
-      url: '/api/auth/register',
-      headers: jsonHeaders(registerPayload),
-      body: registerPayload
+      url: '/api/auth/telegram-mini-app',
+      headers: jsonHeaders(authPayload),
+      body: authPayload
     });
 
-    assert.equal(registerResponse.status, 201);
-    const registerBody = registerResponse.json();
+    assert.equal(authResponse.status, 200);
+    const authBody = authResponse.json();
+    assert.ok(authBody.token);
+    assert.equal(authBody.user.email, 'telegram-77001@telegram.transferly.local');
 
     const deleteResponse = await injectRequest(app, {
       method: 'DELETE',
       url: '/api/user/me',
-      headers: bearerHeaders(registerBody.token)
+      headers: bearerHeaders(authBody.token)
     });
 
     assert.equal(deleteResponse.status, 200);
     assert.equal(deleteResponse.json().deleted, true);
 
-    const deletedUser = await userRepository.findById(registerBody.user.id);
+    const deletedUser = await userRepository.findById(authBody.user.id);
     assert.equal(deletedUser, null);
-
-    const loginPayload = JSON.stringify({
-      email: 'delete-account@example.com',
-      password: 'strongpassword123'
-    });
-
-    const loginResponse = await injectRequest(app, {
-      method: 'POST',
-      url: '/api/auth/login',
-      headers: jsonHeaders(loginPayload),
-      body: loginPayload
-    });
-
-    assert.equal(loginResponse.status, 401);
   });
 
   test('admin user endpoints enforce admin auth and allow manual point adjustments', async () => {
@@ -1226,7 +2520,39 @@ describe('API integration flows', () => {
 
     assert.equal(listResponse.status, 200);
     const listBody = listResponse.json();
-    assert.ok(listBody.data.some((user) => user.user_id === 'demo-user'));
+    const listedDemoUser = listBody.data.find((user) => user.user_id === 'demo-user');
+    assert.ok(listedDemoUser);
+    assert.equal(listedDemoUser.points, 500);
+    assert.equal(listedDemoUser.profile.points, 500);
+    assert.deepEqual(listedDemoUser.point_balance, {
+      ledger_balance: 500,
+      projection_balance: 500,
+      difference: 0,
+      reconciled: true
+    });
+
+    await db.run('UPDATE profiles SET points = ? WHERE user_id = ?', [490, 'demo-user']);
+    try {
+      const driftedListResponse = await injectRequest(app, {
+        method: 'GET',
+        url: '/api/admin/users',
+        headers: bearerHeaders(adminToken)
+      });
+      assert.equal(driftedListResponse.status, 200);
+      const driftedDemoUser = driftedListResponse
+        .json()
+        .data.find((user) => user.user_id === 'demo-user');
+      assert.equal(driftedDemoUser.points, 500);
+      assert.equal(driftedDemoUser.profile.points, 500);
+      assert.deepEqual(driftedDemoUser.point_balance, {
+        ledger_balance: 500,
+        projection_balance: 490,
+        difference: -10,
+        reconciled: false
+      });
+    } finally {
+      await db.run('UPDATE profiles SET points = ? WHERE user_id = ?', [500, 'demo-user']);
+    }
 
     const adjustmentPayload = JSON.stringify({
       delta: 15,
@@ -1236,7 +2562,10 @@ describe('API integration flows', () => {
     const adjustmentResponse = await injectRequest(app, {
       method: 'POST',
       url: '/api/admin/users/demo-user/points',
-      headers: jsonHeaders(adjustmentPayload, bearerHeaders(adminToken)),
+      headers: jsonHeaders(
+        adjustmentPayload,
+        bearerHeaders(adminToken, { 'idempotency-key': 'admin-adjust-demo-user-001' })
+      ),
       body: adjustmentPayload
     });
 
@@ -1244,6 +2573,13 @@ describe('API integration flows', () => {
     const adjustmentBody = adjustmentResponse.json();
     assert.equal(adjustmentBody.user.user_id, 'demo-user');
     assert.equal(adjustmentBody.user.points, 515);
+    assert.equal(adjustmentBody.user.profile.points, 515);
+    assert.deepEqual(adjustmentBody.user.point_balance, {
+      ledger_balance: 515,
+      projection_balance: 515,
+      difference: 0,
+      reconciled: true
+    });
 
     const pointsResponse = await injectRequest(app, {
       method: 'GET',
@@ -1256,6 +2592,97 @@ describe('API integration flows', () => {
 
     const profile = await profileRepository.findByUserId('demo-user');
     assert.equal(profile.points, 515);
+  });
+
+  test('admin point reconciliation is authorized, idempotent, audited, and conflict-safe', async () => {
+    await setPointBalance('demo-user', 100);
+    await db.run('UPDATE profiles SET points = ? WHERE user_id = ?', [90, 'demo-user']);
+
+    const unauthorizedResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/users/demo-user/points/reconciliation',
+      headers: bearerHeaders(userTokens.demoUser)
+    });
+    assert.equal(unauthorizedResponse.status, 401);
+    assert.equal(unauthorizedResponse.json().code, 'ADMIN_AUTH_REQUIRED');
+
+    const driftResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/users/demo-user/points/reconciliation',
+      headers: bearerHeaders(adminToken)
+    });
+    assert.equal(driftResponse.status, 200);
+    assert.deepEqual(driftResponse.json().reconciliation, {
+      user_id: 'demo-user',
+      ledger_balance: 100,
+      projection_balance: 90,
+      difference: -10,
+      reconciled: false
+    });
+
+    const missingKeyPayload = JSON.stringify({ reason: 'Repair point projection drift' });
+    const missingKeyResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/admin/users/demo-user/points/reconciliation',
+      headers: jsonHeaders(missingKeyPayload, bearerHeaders(adminToken)),
+      body: missingKeyPayload
+    });
+    assert.equal(missingKeyResponse.status, 400);
+    assert.equal(missingKeyResponse.json().code, 'IDEMPOTENCY_KEY_REQUIRED');
+
+    const reconcileHeaders = jsonHeaders(
+      missingKeyPayload,
+      bearerHeaders(adminToken, { 'idempotency-key': 'point-reconcile-demo-001' })
+    );
+    const reconcileResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/admin/users/demo-user/points/reconciliation',
+      headers: reconcileHeaders,
+      body: missingKeyPayload
+    });
+    assert.equal(reconcileResponse.status, 200);
+    assert.deepEqual(reconcileResponse.json().reconciliation, {
+      user_id: 'demo-user',
+      ledger_balance: 100,
+      projection_balance: 100,
+      difference: 0,
+      reconciled: true
+    });
+
+    const retryResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/admin/users/demo-user/points/reconciliation',
+      headers: reconcileHeaders,
+      body: missingKeyPayload
+    });
+    assert.equal(retryResponse.status, 200);
+    assert.equal(retryResponse.json().reconciliation.reconciled, true);
+
+    const eventCount = await db.get(
+      'SELECT COUNT(*) AS count FROM points_transactions WHERE user_id = ? AND type = ?',
+      ['demo-user', 'POINT_PROJECTION_RECONCILIATION']
+    );
+    assert.equal(eventCount.count, 1);
+
+    const auditCount = await db.get(
+      'SELECT COUNT(*) AS count FROM audit_logs WHERE entity_type = ? AND entity_id = ? AND action = ?',
+      ['user', 'demo-user', 'slipcraft.admin.points_reconciled']
+    );
+    assert.equal(auditCount.count, 1);
+
+    const conflictPayload = JSON.stringify({ reason: 'A different repair reason' });
+    const conflictResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/admin/users/demo-user/points/reconciliation',
+      headers: jsonHeaders(
+        conflictPayload,
+        bearerHeaders(adminToken, { 'idempotency-key': 'point-reconcile-demo-001' })
+      ),
+      body: conflictPayload
+    });
+    assert.equal(conflictResponse.status, 409);
+    assert.equal(conflictResponse.json().code, 'POINT_TRANSACTION_ENTRY_CONFLICT');
+    assert.equal((await profileRepository.findByUserId('demo-user')).points, 100);
   });
 
   test('PATCH /api/admin/config updates platform content settings', async () => {
@@ -1677,6 +3104,57 @@ describe('API integration flows', () => {
     assert.equal(body.balance.pending[0].amount, '250.00');
   });
 
+  test('GET /api/admin/payment-providers/health scores provider operations from issues and webhooks', async () => {
+    await webhookEventRepository.create({
+      eventId: 'stripe:evt_provider_health_failed_1',
+      eventType: 'charge.failed',
+      resourceType: 'charge',
+      transmissionId: 'stripe-health-transmission-1',
+      status: 'FAILED',
+      payload: {
+        provider: 'stripe',
+        type: 'charge.failed',
+        data: {
+          object: {
+            id: 'ch_failed_health_1'
+          }
+        }
+      },
+      verificationPayload: {
+        stripe_signature_present: true
+      },
+      processingAttempts: 2,
+      lastError: 'Signature verification failed'
+    });
+    await paymentOpsIssueRepository.upsert({
+      entityType: 'webhook',
+      entityId: 'stripe:evt_provider_health_failed_1',
+      issueType: 'WEBHOOK_PROCESSING_FAILED',
+      severity: 'HIGH',
+      status: 'OPEN',
+      summary: 'Stripe webhook processing failed and needs replay.',
+      metadata: {
+        provider: 'stripe'
+      }
+    });
+
+    const response = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/payment-providers/health',
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(response.status, 200);
+    const body = response.json();
+    const stripe = body.data.find((provider) => provider.provider === 'stripe');
+    assert.ok(stripe);
+    assert.ok(stripe.score < 100);
+    assert.equal(stripe.failed_webhooks, 1);
+    assert.equal(stripe.unresolved_issues, 1);
+    assert.ok(stripe.reasons.some((reason) => reason.includes('webhook')));
+    assert.ok(stripe.next_actions.some((action) => action.includes('webhook')));
+  });
+
   test('admin can create, onboard, refresh, and webhook-sync a Stripe connected account', async () => {
     const createPayload = JSON.stringify({
       userId: 'demo-user',
@@ -1984,6 +3462,197 @@ describe('API integration flows', () => {
     );
     assert.ok(storedIssue);
     assert.equal(storedIssue.status, 'OPEN');
+  });
+
+  test('admin provider filters scope webhook events and payment issues', async () => {
+    await webhookEventRepository.create({
+      eventId: 'WH-PROVIDER-PAYPAL-1',
+      eventType: 'INVOICING.INVOICE.PAID',
+      resourceType: 'invoices',
+      transmissionId: 'paypal-transmission-provider-1',
+      status: 'PROCESSED',
+      payload: {
+        id: 'WH-PROVIDER-PAYPAL-1',
+        event_type: 'INVOICING.INVOICE.PAID'
+      }
+    });
+    await webhookEventRepository.create({
+      eventId: 'stripe:evt_provider_filter_1',
+      eventType: 'invoice.paid',
+      resourceType: 'invoice',
+      transmissionId: 'stripe-signature-provider-1',
+      status: 'PROCESSED',
+      payload: {
+        id: 'evt_provider_filter_1',
+        type: 'invoice.paid',
+        provider: 'stripe'
+      }
+    });
+
+    await paymentOpsIssueRepository.upsert({
+      entityType: 'invoice',
+      entityId: 'provider-filter-legacy-paypal',
+      issueType: 'LEGACY_PAYPAL_PROVIDER_FILTER',
+      severity: 'MEDIUM',
+      status: 'OPEN',
+      summary: 'Legacy PayPal issue'
+    });
+    await paymentOpsIssueRepository.upsert({
+      entityType: 'invoice',
+      entityId: 'provider-filter-stripe',
+      issueType: 'STRIPE_PROVIDER_FILTER',
+      severity: 'HIGH',
+      status: 'OPEN',
+      summary: 'Stripe provider issue',
+      metadata: {
+        provider: 'stripe'
+      }
+    });
+
+    const stripeWebhookResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/webhooks?provider=stripe&status=PROCESSED&limit=10',
+      headers: bearerHeaders(adminToken)
+    });
+    assert.equal(stripeWebhookResponse.status, 200);
+    const stripeWebhookIds = stripeWebhookResponse.json().data.map((event) => event.event_id);
+    assert.ok(stripeWebhookIds.includes('stripe:evt_provider_filter_1'));
+    assert.equal(stripeWebhookIds.includes('WH-PROVIDER-PAYPAL-1'), false);
+
+    const paypalWebhookResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/webhooks?provider=paypal&status=PROCESSED&limit=10',
+      headers: bearerHeaders(adminToken)
+    });
+    assert.equal(paypalWebhookResponse.status, 200);
+    const paypalWebhookIds = paypalWebhookResponse.json().data.map((event) => event.event_id);
+    assert.ok(paypalWebhookIds.includes('WH-PROVIDER-PAYPAL-1'));
+    assert.equal(paypalWebhookIds.includes('stripe:evt_provider_filter_1'), false);
+
+    const stripeIssueResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/payment-issues?provider=stripe&status=OPEN&limit=10',
+      headers: bearerHeaders(adminToken)
+    });
+    assert.equal(stripeIssueResponse.status, 200);
+    const stripeIssueTypes = stripeIssueResponse.json().data.map((issue) => issue.issue_type);
+    assert.ok(stripeIssueTypes.includes('STRIPE_PROVIDER_FILTER'));
+    assert.equal(stripeIssueTypes.includes('LEGACY_PAYPAL_PROVIDER_FILTER'), false);
+
+    const paypalIssueResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/payment-issues?provider=paypal&status=OPEN&limit=10',
+      headers: bearerHeaders(adminToken)
+    });
+    assert.equal(paypalIssueResponse.status, 200);
+    const paypalIssueTypes = paypalIssueResponse.json().data.map((issue) => issue.issue_type);
+    assert.ok(paypalIssueTypes.includes('LEGACY_PAYPAL_PROVIDER_FILTER'));
+    assert.equal(paypalIssueTypes.includes('STRIPE_PROVIDER_FILTER'), false);
+  });
+
+  test('admin can inspect, replay, and ignore webhook events with sanitized metadata', async () => {
+    const failedEvent = await webhookEventRepository.create({
+      eventId: 'stripe:evt_admin_replay_1',
+      eventType: 'provider.unknown',
+      resourceType: 'invoice',
+      transmissionId: 'stripe-signature-admin-replay',
+      status: 'FAILED',
+      payload: {
+        id: 'evt_admin_replay_1',
+        type: 'provider.unknown',
+        provider: 'stripe',
+        data: {
+          object: {
+            id: 'in_admin_1',
+            object: 'invoice',
+            secret: 'should-not-return'
+          }
+        }
+      },
+      verificationPayload: {
+        stripe_signature_present: true
+      },
+      processingAttempts: 2,
+      lastError: 'previous failure'
+    });
+
+    const detailResponse = await injectRequest(app, {
+      method: 'GET',
+      url: `/api/admin/webhooks/${failedEvent.id}`,
+      headers: bearerHeaders(adminToken)
+    });
+    assert.equal(detailResponse.status, 200);
+    const detail = detailResponse.json().event;
+    assert.equal(detail.provider, 'stripe');
+    assert.equal(detail.sanitized_payload.id, 'evt_admin_replay_1');
+    assert.equal(detail.sanitized_payload.resource_id, 'in_admin_1');
+    assert.equal(detail.sanitized_payload.secret, undefined);
+    assert.equal(detail.payload, undefined);
+    assert.equal(detail.verification.signature_header_present, true);
+    assert.equal(detail.can_replay, true);
+    assert.equal(detail.can_ignore, true);
+
+    const replayPayload = JSON.stringify({ note: 'retry after provider recovery' });
+    const replayResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/admin/webhooks/${failedEvent.id}/replay`,
+      headers: jsonHeaders(replayPayload, bearerHeaders(adminToken)),
+      body: replayPayload
+    });
+    assert.equal(replayResponse.status, 200);
+    const replayed = replayResponse.json().event;
+    assert.equal(replayed.status, 'IGNORED');
+    assert.equal(replayed.last_error, null);
+    assert.equal(replayed.processing_attempts, 3);
+    assert.equal(replayed.sanitized_payload.resource_id, 'in_admin_1');
+
+    const ignoredEvent = await webhookEventRepository.create({
+      eventId: 'stripe:evt_admin_ignore_1',
+      eventType: 'provider.unknown',
+      resourceType: 'invoice',
+      transmissionId: 'stripe-signature-admin-ignore',
+      status: 'FAILED',
+      payload: {
+        id: 'evt_admin_ignore_1',
+        type: 'provider.unknown',
+        provider: 'stripe'
+      },
+      lastError: 'operator review'
+    });
+    const ignorePayload = JSON.stringify({ note: 'operator confirmed duplicate' });
+    const ignoreResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/admin/webhooks/${ignoredEvent.id}/ignore`,
+      headers: jsonHeaders(ignorePayload, bearerHeaders(adminToken)),
+      body: ignorePayload
+    });
+    assert.equal(ignoreResponse.status, 200);
+    const ignored = ignoreResponse.json().event;
+    assert.equal(ignored.status, 'IGNORED');
+    assert.equal(ignored.last_error, null);
+    assert.equal(ignored.can_ignore, false);
+
+    const rejectedEvent = await webhookEventRepository.create({
+      eventId: 'stripe:evt_admin_rejected_1',
+      eventType: 'provider.unknown',
+      resourceType: 'invoice',
+      transmissionId: 'stripe-signature-admin-rejected',
+      status: 'REJECTED',
+      payload: {
+        id: 'evt_admin_rejected_1',
+        type: 'provider.unknown',
+        provider: 'stripe'
+      }
+    });
+    const rejectedReplayPayload = JSON.stringify({ note: 'should fail' });
+    const rejectedReplayResponse = await injectRequest(app, {
+      method: 'POST',
+      url: `/api/admin/webhooks/${rejectedEvent.id}/replay`,
+      headers: jsonHeaders(rejectedReplayPayload, bearerHeaders(adminToken)),
+      body: rejectedReplayPayload
+    });
+    assert.equal(rejectedReplayResponse.status, 409);
+    assert.equal(rejectedReplayResponse.json().code, 'WEBHOOK_REPLAY_NOT_ALLOWED');
   });
 
   test('admins can acknowledge, resolve, and reopen payment issues without losing acknowledgement state on sync', async () => {
@@ -2359,54 +4028,70 @@ describe('API integration flows', () => {
     assert.ok(timelineBody.data.some((entry) => entry.action === 'invoice.note_added'));
   });
 
-  test('auth register/login, points lookup, receipt generation, email dispatch, referral stats, and telegram webhook all work through the new SlipCraft endpoints', async () => {
-    const registerPayload = JSON.stringify({
-      email: 'slipcraft-user@example.com',
-      password: 'strongpassword123',
-      name: 'SlipCraft User',
-      countryCode: 'US'
+  test('referral claims award the ledger bonus without exposing referred-user point projections', async () => {
+    const referrerProfile = await profileRepository.findByUserId('demo-user');
+    const balanceBefore = await pointLedgerService.getBalance('demo-user');
+    const payload = JSON.stringify({
+      action: 'claim',
+      referralCode: referrerProfile.referralCode
     });
 
-    const registerResponse = await injectRequest(app, {
+    const response = await injectRequest(app, {
       method: 'POST',
-      url: '/api/auth/register',
-      headers: jsonHeaders(registerPayload),
-      body: registerPayload
+      url: '/api/referral',
+      headers: jsonHeaders(payload, bearerHeaders(userTokens.secondaryUser)),
+      body: payload
     });
 
-    assert.equal(registerResponse.status, 201);
-    const registerBody = registerResponse.json();
-    assert.ok(registerBody.token);
-    assert.equal(registerBody.user.email, 'slipcraft-user@example.com');
-    assert.equal(registerBody.user.profile.points, 50);
+    assert.equal(response.status, 201);
+    const body = response.json();
+    assert.equal(body.user_id, 'demo-user');
+    assert.equal(body.referral_count, 1);
+    assert.equal(body.referred_users.length, 1);
+    assert.equal(body.referred_users[0].id, 'secondary-user');
+    assert.equal(Object.hasOwn(body.referred_users[0], 'points'), false);
+    assert.equal(await pointLedgerService.getBalance('demo-user'), balanceBefore + body.points_earned);
+  });
 
-    const loginPayload = JSON.stringify({
-      email: 'slipcraft-user@example.com',
-      password: 'strongpassword123'
+  test('telegram mini app auth, points lookup, receipt generation, email dispatch, referral stats, and telegram webhook all work through the SlipCraft endpoints', async () => {
+    const initData = createTelegramMiniAppInitData({
+      user: {
+        id: 88001,
+        first_name: 'SlipCraft',
+        last_name: 'User',
+        username: 'slipcraft_user'
+      },
+      startParam: 'dashboard'
+    });
+    const authPayload = JSON.stringify({
+      initData,
+      startParam: 'dashboard'
     });
 
-    const loginResponse = await injectRequest(app, {
+    const authResponse = await injectRequest(app, {
       method: 'POST',
-      url: '/api/auth/login',
-      headers: jsonHeaders(loginPayload),
-      body: loginPayload
+      url: '/api/auth/telegram-mini-app',
+      headers: jsonHeaders(authPayload),
+      body: authPayload
     });
 
-    assert.equal(loginResponse.status, 200);
-    const loginBody = loginResponse.json();
-    assert.ok(loginBody.token);
-    assert.equal(loginBody.user.id, registerBody.user.id);
+    assert.equal(authResponse.status, 200);
+    const authBody = authResponse.json();
+    assert.ok(authBody.token);
+    assert.equal(authBody.user.email, 'telegram-88001@telegram.transferly.local');
+    assert.equal(authBody.user.profile.points, 50);
 
     const pointsResponse = await injectRequest(app, {
       method: 'GET',
-      url: `/api/user/${registerBody.user.id}/points`,
-      headers: bearerHeaders(loginBody.token)
+      url: `/api/user/${authBody.user.id}/points`,
+      headers: bearerHeaders(authBody.token)
     });
 
     assert.equal(pointsResponse.status, 200);
     assert.equal(pointsResponse.json().points, 50);
 
     const receiptPayload = JSON.stringify({
+      serviceSlug: 'faker-data',
       type: 'bank',
       title: 'SlipCraft Demo Receipt',
       details: {
@@ -2418,7 +4103,7 @@ describe('API integration flows', () => {
     const receiptResponse = await injectRequest(app, {
       method: 'POST',
       url: '/api/receipt/generate',
-      headers: jsonHeaders(receiptPayload, bearerHeaders(loginBody.token)),
+      headers: jsonHeaders(receiptPayload, bearerHeaders(authBody.token)),
       body: receiptPayload
     });
 
@@ -2428,6 +4113,61 @@ describe('API integration flows', () => {
     assert.match(receiptBody.pdf_data_url, /^data:application\/pdf;base64,/);
     assert.match(receiptBody.image_data_url, /^data:image\/svg\+xml;base64,/);
     assert.equal(receiptBody.summary.remaining_points, 40);
+    assert.deepEqual(receiptBody.safety, {
+      mode: 'sandbox',
+      required_markings: SANDBOX_REQUIRED_MARKINGS
+    });
+    assert.equal(receiptBody.receipt.data.details.service, 'faker-data');
+    assert.equal(receiptBody.receipt.data.details.sandbox, true);
+    assert.deepEqual(receiptBody.receipt.data.details.required_markings, SANDBOX_REQUIRED_MARKINGS);
+    for (const marking of SANDBOX_REQUIRED_MARKINGS) {
+      assert.ok(receiptBody.receipt.data.fields.some((field) => field.value === marking));
+      assertReceiptArtifactsInclude(receiptBody, marking);
+    }
+
+    const pointReservations = await db.all(
+      'SELECT * FROM point_reservations WHERE user_id = ? AND reference_type = ? AND reference_id = ?',
+      [authBody.user.id, 'RECEIPT', receiptBody.receipt.id]
+    );
+    assert.equal(pointReservations.length, 1);
+    assert.equal(pointReservations[0].status, 'COMMITTED');
+    assert.equal(pointReservations[0].amount, 10);
+    assert.equal(pointReservations[0].available_points_before, 50);
+    assert.equal(pointReservations[0].available_points_after, 40);
+    assert.ok(pointReservations[0].committed_at);
+
+    const receiptPointEntries = await db.all(
+      'SELECT * FROM points_transactions WHERE reference_type = ? AND reference_id = ? ORDER BY created_at ASC',
+      ['RECEIPT', receiptBody.receipt.id]
+    );
+    assert.equal(receiptPointEntries.length, 2);
+    assert.deepEqual(receiptPointEntries.map((entry) => entry.amount), [-10, 0]);
+    assert.equal(receiptPointEntries[0].type, 'RECEIPT_SPEND');
+    assert.equal(receiptPointEntries[1].type, 'POINT_RESERVATION_COMMIT');
+    assert.equal(receiptPointEntries[0].entry_key, `point-reservation:${pointReservations[0].id}:hold`);
+    assert.equal(receiptPointEntries[1].entry_key, `point-reservation:${pointReservations[0].id}:commit`);
+
+    const blockedReceiptPayload = JSON.stringify({
+      serviceSlug: 'opay',
+      type: 'bank',
+      details: {
+        amount: '25.00'
+      }
+    });
+    const blockedReceiptResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/receipt/generate',
+      headers: jsonHeaders(blockedReceiptPayload, bearerHeaders(authBody.token)),
+      body: blockedReceiptPayload
+    });
+
+    assert.equal(blockedReceiptResponse.status, 410);
+    assert.equal(blockedReceiptResponse.json().code, 'LEGACY_RECEIPT_GENERATION_DISABLED');
+    assert.equal(await pointLedgerService.getBalance(authBody.user.id), 40);
+    assert.equal(
+      (await db.get('SELECT COUNT(*) AS count FROM receipts WHERE user_id = ?', [authBody.user.id])).count,
+      1
+    );
 
     const emailPayload = JSON.stringify({
       receiptId: receiptBody.receipt.id,
@@ -2437,7 +4177,7 @@ describe('API integration flows', () => {
     const emailResponse = await injectRequest(app, {
       method: 'POST',
       url: '/api/email/send',
-      headers: jsonHeaders(emailPayload, bearerHeaders(loginBody.token)),
+      headers: jsonHeaders(emailPayload, bearerHeaders(authBody.token)),
       body: emailPayload
     });
 
@@ -2449,7 +4189,7 @@ describe('API integration flows', () => {
     const referralResponse = await injectRequest(app, {
       method: 'POST',
       url: '/api/referral',
-      headers: jsonHeaders('{}', bearerHeaders(loginBody.token)),
+      headers: jsonHeaders('{}', bearerHeaders(authBody.token)),
       body: '{}'
     });
 
@@ -2459,8 +4199,8 @@ describe('API integration flows', () => {
     assert.ok(referralBody.referral_code);
 
     await telegramRepository.upsertAccount({
-      userId: registerBody.user.id,
-      telegramUserId: 'tg-user-1',
+      userId: authBody.user.id,
+      telegramUserId: '88001',
       chatId: 'tg-chat-1',
       username: 'slipcraft_bot_user',
       firstName: 'Slip',
@@ -2475,7 +4215,7 @@ describe('API integration flows', () => {
           id: 'tg-chat-1'
         },
         from: {
-          id: 'tg-user-1',
+          id: '88001',
           username: 'slipcraft_bot_user',
           first_name: 'Slip',
           last_name: 'Craft'
@@ -2497,6 +4237,85 @@ describe('API integration flows', () => {
     assert.equal(telegramBody.command, '/balance');
     assert.equal(telegramBody.response.data.points, 40);
 
+    const telegramProfilePayload = JSON.stringify({
+      update_id: 5,
+      message: {
+        text: '/profile',
+        chat: {
+          id: 'tg-chat-1'
+        },
+        from: {
+          id: '88001',
+          username: 'slipcraft_bot_user',
+          first_name: 'Slip',
+          last_name: 'Craft'
+        }
+      }
+    });
+
+    const telegramProfileResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/telegram/webhook',
+      headers: jsonHeaders(telegramProfilePayload, {
+        'x-telegram-bot-api-secret-token': ''
+      }),
+      body: telegramProfilePayload
+    });
+
+    assert.equal(telegramProfileResponse.status, 200);
+    assert.equal(telegramProfileResponse.json().response.data.points, 40);
+
+    await db.run('UPDATE profiles SET points = points + 1 WHERE user_id = ?', [authBody.user.id]);
+    try {
+      const unreconciledProfileResponse = await injectRequest(app, {
+        method: 'POST',
+        url: '/api/telegram/webhook',
+        headers: jsonHeaders(telegramProfilePayload, {
+          'x-telegram-bot-api-secret-token': ''
+        }),
+        body: telegramProfilePayload
+      });
+
+      assert.equal(unreconciledProfileResponse.status, 409);
+      assert.equal(unreconciledProfileResponse.json().code, 'POINT_LEDGER_OUT_OF_BALANCE');
+    } finally {
+      await db.run('UPDATE profiles SET points = points - 1 WHERE user_id = ?', [authBody.user.id]);
+    }
+
+    const telegramMiniAppPayload = JSON.stringify({
+      update_id: 4,
+      message: {
+        text: '/miniapp',
+        chat: {
+          id: 'tg-chat-1'
+        },
+        from: {
+          id: '88001',
+          username: 'slipcraft_bot_user',
+          first_name: 'Slip',
+          last_name: 'Craft'
+        }
+      }
+    });
+
+    const telegramMiniAppResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/telegram/webhook',
+      headers: jsonHeaders(telegramMiniAppPayload, {
+        'x-telegram-bot-api-secret-token': ''
+      }),
+      body: telegramMiniAppPayload
+    });
+
+    assert.equal(telegramMiniAppResponse.status, 200);
+    const telegramMiniAppBody = telegramMiniAppResponse.json();
+    assert.equal(telegramMiniAppBody.command, '/miniapp');
+    assert.equal(telegramMiniAppBody.response.data.reply_markup.inline_keyboard[0][0].text, 'Open Transferly');
+    assert.equal(telegramMiniAppBody.response.data.reply_markup.inline_keyboard[0][0].web_app.url, 'https://mini.transferly.test');
+    assert.deepEqual(telegramMiniAppBody.response.data.launch_buttons, [
+      { text: 'Open Transferly', section: 'dashboard', url: 'https://mini.transferly.test' }
+    ]);
+
     const telegramGeneratePayload = JSON.stringify({
       update_id: 2,
       message: {
@@ -2505,7 +4324,7 @@ describe('API integration flows', () => {
           id: 'tg-chat-1'
         },
         from: {
-          id: 'tg-user-1',
+          id: '88001',
           username: 'slipcraft_bot_user',
           first_name: 'Slip',
           last_name: 'Craft'
@@ -2525,7 +4344,8 @@ describe('API integration flows', () => {
     assert.equal(telegramGenerateResponse.status, 200);
     const telegramGenerateBody = telegramGenerateResponse.json();
     assert.equal(telegramGenerateBody.command, '/generate_receipt');
-    assert.equal(telegramGenerateBody.response.data.receipt.data.details.service, 'opay');
+    assert.equal(telegramGenerateBody.response.ok, false);
+    assert.equal(telegramGenerateBody.response.data.code, 'LEGACY_RECEIPT_GENERATION_DISABLED');
 
     const telegramHistoryPayload = JSON.stringify({
       update_id: 3,
@@ -2535,7 +4355,7 @@ describe('API integration flows', () => {
           id: 'tg-chat-1'
         },
         from: {
-          id: 'tg-user-1',
+          id: '88001',
           username: 'slipcraft_bot_user',
           first_name: 'Slip',
           last_name: 'Craft'
@@ -2555,18 +4375,265 @@ describe('API integration flows', () => {
     assert.equal(telegramHistoryResponse.status, 200);
     const telegramHistoryBody = telegramHistoryResponse.json();
     assert.equal(telegramHistoryBody.command, '/history');
-    assert.equal(telegramHistoryBody.response.data.length, 1);
-    assert.equal(telegramHistoryBody.response.data[0].data.details.service, 'opay');
+    assert.equal(telegramHistoryBody.response.data.length, 0);
 
     const receipt = await receiptRepository.findById(receiptBody.receipt.id);
     assert.equal(receipt.status, 'EMAILED');
 
-    const profile = await profileRepository.findByUserId(registerBody.user.id);
-    assert.equal(profile.points, 30);
+    const profile = await profileRepository.findByUserId(authBody.user.id);
+    assert.equal(profile.points, 40);
   });
 
-  test('telegram receipt webhook preserves Transferly service-specific details and filters history by service', async () => {
-    await profileRepository.updateByUserId('demo-user', { points: 500 });
+  test('POST /api/auth/telegram-mini-app validates Telegram init data and issues a user token', async () => {
+    const initData = createTelegramMiniAppInitData({
+      user: {
+        id: 9001002,
+        first_name: 'Mini',
+        last_name: 'App',
+        username: 'miniapp_user',
+        language_code: 'en'
+      },
+      startParam: 'wallet'
+    });
+    const payload = JSON.stringify({
+      initData,
+      startParam: 'wallet'
+    });
+
+    const response = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/auth/telegram-mini-app',
+      headers: jsonHeaders(payload),
+      body: payload
+    });
+
+    assert.equal(response.status, 200);
+    const body = response.json();
+    assert.ok(body.token);
+    assert.ok(body.session_expires_at);
+    assert.equal(body.user.email, 'telegram-9001002@telegram.transferly.local');
+    assert.equal(body.user.profile.name, 'Mini App');
+    assert.equal(body.user.profile.points, 50);
+
+    const account = await telegramRepository.findAccountByTelegramUserId(9001002);
+    assert.equal(account.userId, body.user.id);
+    assert.equal(account.username, 'miniapp_user');
+    assert.equal(account.languageCode, 'en');
+    assert.ok(account.lastAuthenticatedAt);
+
+    const tokenPayload = JSON.parse(Buffer.from(body.token.split('.')[1], 'base64url').toString('utf8'));
+    const authSession = await authSessionRepository.findById(tokenPayload.sid);
+    assert.equal(authSession.userId, body.user.id);
+    assert.equal(authSession.telegramUserId, '9001002');
+    assert.equal(authSession.currentTokenId, tokenPayload.jti);
+    assert.equal(authSession.status, 'active');
+
+    const meResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/me',
+      headers: bearerHeaders(body.token)
+    });
+
+    assert.equal(meResponse.status, 200);
+    assert.equal(meResponse.json().user.id, body.user.id);
+
+    const replayResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/auth/telegram-mini-app',
+      headers: jsonHeaders(payload),
+      body: payload
+    });
+
+    assert.equal(replayResponse.status, 409);
+    assert.equal(replayResponse.json().code, 'TELEGRAM_INIT_DATA_REPLAYED');
+
+    const tamperedInitData = `${initData.slice(0, -1)}${initData.endsWith('0') ? '1' : '0'}`;
+    const tamperedPayload = JSON.stringify({
+      initData: tamperedInitData
+    });
+    const tamperedResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/auth/telegram-mini-app',
+      headers: jsonHeaders(tamperedPayload),
+      body: tamperedPayload
+    });
+
+    assert.equal(tamperedResponse.status, 401);
+    assert.equal(tamperedResponse.json().code, 'TELEGRAM_INIT_DATA_INVALID');
+
+    await db.run("UPDATE users SET status = 'suspended' WHERE id = ?", [body.user.id]);
+
+    const suspendedSessionResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/me',
+      headers: bearerHeaders(body.token)
+    });
+
+    assert.equal(suspendedSessionResponse.status, 403);
+    assert.equal(suspendedSessionResponse.json().code, 'ACCOUNT_NOT_ACTIVE');
+
+    const suspendedInitData = createTelegramMiniAppInitData({
+      user: {
+        id: 9001002,
+        first_name: 'Mini',
+        last_name: 'App',
+        username: 'miniapp_user',
+        language_code: 'en'
+      },
+      startParam: 'suspended-account'
+    });
+    const suspendedPayload = JSON.stringify({ initData: suspendedInitData });
+    const suspendedLoginResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/auth/telegram-mini-app',
+      headers: jsonHeaders(suspendedPayload),
+      body: suspendedPayload
+    });
+
+    assert.equal(suspendedLoginResponse.status, 403);
+    assert.equal(suspendedLoginResponse.json().code, 'ACCOUNT_NOT_ACTIVE');
+
+    const sessionCount = await db.get('SELECT COUNT(*) AS count FROM auth_sessions WHERE user_id = ?', [body.user.id]);
+    assert.equal(sessionCount.count, 1);
+
+    await db.run("UPDATE users SET status = 'active' WHERE id = ?", [body.user.id]);
+    await db.run(
+      "UPDATE auth_sessions SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+      [authSession.id]
+    );
+
+    const expiredSessionResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/me',
+      headers: bearerHeaders(body.token)
+    });
+
+    assert.equal(expiredSessionResponse.status, 401);
+    assert.equal(expiredSessionResponse.json().code, 'SESSION_EXPIRED');
+  });
+
+  test('POST /api/auth/telegram preserves owner authorization for workspace and admin routes', async () => {
+    const initData = createTelegramMiniAppInitData({
+      user: {
+        id: 9001003,
+        first_name: 'Owner',
+        last_name: 'User',
+        username: 'transferly_owner',
+        language_code: 'en'
+      },
+      startParam: 'admin'
+    });
+    const payload = JSON.stringify({
+      initData,
+      startParam: 'admin'
+    });
+
+    const response = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/auth/telegram',
+      headers: jsonHeaders(payload),
+      body: payload
+    });
+
+    assert.equal(response.status, 200);
+    const body = response.json();
+    assert.ok(body.token);
+    assert.equal(body.user.role, 'OWNER');
+    assert.equal(body.user.isAdmin, true);
+    assert.equal(body.user.isOwner, true);
+    assert.equal(body.user.profile.role, 'OWNER');
+
+    const workspaceResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/workspace',
+      headers: bearerHeaders(body.token)
+    });
+
+    assert.equal(workspaceResponse.status, 200);
+    assert.equal(workspaceResponse.json().user.id, body.user.id);
+
+    await db.run('UPDATE profiles SET points = points + 1 WHERE user_id = ?', [body.user.id]);
+    try {
+      const unreconciledRefreshResponse = await injectRequest(app, {
+        method: 'POST',
+        url: '/api/auth/refresh',
+        headers: bearerHeaders(body.token)
+      });
+
+      assert.equal(unreconciledRefreshResponse.status, 409);
+      assert.equal(unreconciledRefreshResponse.json().code, 'POINT_LEDGER_OUT_OF_BALANCE');
+    } finally {
+      await db.run('UPDATE profiles SET points = points - 1 WHERE user_id = ?', [body.user.id]);
+    }
+
+    const refreshResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/auth/refresh',
+      headers: bearerHeaders(body.token)
+    });
+
+    assert.equal(refreshResponse.status, 200);
+    const refreshedBody = refreshResponse.json();
+    assert.ok(refreshedBody.token);
+    assert.equal(refreshedBody.user.role, 'OWNER');
+
+    const rotatedTokenResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/me',
+      headers: bearerHeaders(body.token)
+    });
+
+    assert.equal(rotatedTokenResponse.status, 401);
+    assert.equal(rotatedTokenResponse.json().code, 'SESSION_INVALID');
+
+    const adminResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/users',
+      headers: bearerHeaders(refreshedBody.token)
+    });
+
+    assert.equal(adminResponse.status, 200);
+
+    await profileRepository.updateByUserId(body.user.id, { role: 'USER' });
+    const downgradedAdminResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/users',
+      headers: bearerHeaders(refreshedBody.token)
+    });
+
+    assert.equal(downgradedAdminResponse.status, 401);
+    assert.equal(downgradedAdminResponse.json().code, 'ADMIN_AUTH_REQUIRED');
+
+    const crossAccountResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/user/secondary-user/points',
+      headers: bearerHeaders(refreshedBody.token)
+    });
+
+    assert.equal(crossAccountResponse.status, 403);
+    assert.equal(crossAccountResponse.json().code, 'USER_SCOPE_VIOLATION');
+
+    const logoutResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/auth/logout',
+      headers: bearerHeaders(refreshedBody.token)
+    });
+
+    assert.equal(logoutResponse.status, 200);
+    assert.deepEqual(logoutResponse.json(), { ok: true, revoked: true });
+
+    const revokedTokenResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/me',
+      headers: bearerHeaders(refreshedBody.token)
+    });
+
+    assert.equal(revokedTokenResponse.status, 401);
+    assert.equal(revokedTokenResponse.json().code, 'SESSION_INVALID');
+  });
+
+  test('telegram receipt webhook rejects non-sandbox legacy receipt services without spending points', async () => {
+    await setPointBalance('demo-user', 500);
     await telegramRepository.upsertAccount({
       userId: 'demo-user',
       telegramUserId: 'tg-transferly-services',
@@ -2799,6 +4866,9 @@ describe('API integration flows', () => {
       }
     ];
 
+    const receiptCountBefore = (await db.get('SELECT COUNT(*) AS count FROM receipts WHERE user_id = ?', ['demo-user'])).count;
+    const pointBalanceBefore = await pointLedgerService.getBalance('demo-user');
+
     for (const [index, serviceRequest] of serviceRequests.entries()) {
       const telegramPayload = JSON.stringify({
         update_id: 3000 + index,
@@ -2828,21 +4898,15 @@ describe('API integration flows', () => {
       assert.equal(response.status, 200);
       const body = response.json();
       assert.equal(body.command, '/generate_receipt');
-      assert.equal(body.response.data.receipt.data.details.service, serviceRequest.details.service);
-      assertReceiptLayout(body.response.data, serviceRequest.providerName, serviceRequest.category);
-
-      for (const [key, value] of Object.entries(serviceRequest.details)) {
-        assert.equal(body.response.data.receipt.data.details[key], value);
-      }
-
-      for (const [label, value] of serviceRequest.artifactChecks) {
-        assert.ok(
-          body.response.data.receipt.data.fields.some((field) => field.label === label && field.value === value)
-        );
-        assertReceiptArtifactsInclude(body.response.data, label);
-        assertReceiptArtifactsInclude(body.response.data, value);
-      }
+      assert.equal(body.response.ok, false);
+      assert.equal(body.response.data.code, 'LEGACY_RECEIPT_GENERATION_DISABLED');
     }
+
+    assert.equal(await pointLedgerService.getBalance('demo-user'), pointBalanceBefore);
+    assert.equal(
+      (await db.get('SELECT COUNT(*) AS count FROM receipts WHERE user_id = ?', ['demo-user'])).count,
+      receiptCountBefore
+    );
 
     const paypalHistoryPayload = JSON.stringify({
       update_id: 4000,
@@ -2871,9 +4935,7 @@ describe('API integration flows', () => {
 
     assert.equal(paypalHistoryResponse.status, 200);
     const paypalHistoryBody = paypalHistoryResponse.json();
-    assert.equal(paypalHistoryBody.response.data.length, 1);
-    assert.equal(paypalHistoryBody.response.data[0].data.details.service, 'paypal');
-    assert.equal(paypalHistoryBody.response.data[0].data.details.invoice_or_transaction_id, 'PAYPAL-INV-001');
+    assert.equal(paypalHistoryBody.response.data.length, 0);
 
     const cryptoHistoryPayload = JSON.stringify({
       update_id: 4001,
@@ -2902,9 +4964,7 @@ describe('API integration flows', () => {
 
     assert.equal(cryptoHistoryResponse.status, 200);
     const cryptoHistoryBody = cryptoHistoryResponse.json();
-    assert.equal(cryptoHistoryBody.response.data.length, 1);
-    assert.equal(cryptoHistoryBody.response.data[0].data.details.service, 'crypto-receipts');
-    assert.equal(cryptoHistoryBody.response.data[0].data.details.transaction_hash, 'CRYPTO-HASH-001');
+    assert.equal(cryptoHistoryBody.response.data.length, 0);
   });
 
   test('user-scoped invoice access blocks cross-account reads and lists only owned records', async () => {
@@ -3441,6 +5501,24 @@ describe('API integration flows', () => {
     assert.equal(filteredListResponse.status, 200);
     assert.equal(filteredListResponse.json().data.length, 1);
     assert.equal(filteredListResponse.json().data[0].payout_id, requestBody.payout_id);
+
+    const paypalProviderResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/payouts?provider=paypal&pageSize=5',
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(paypalProviderResponse.status, 200);
+    assert.ok(paypalProviderResponse.json().data.some((entry) => entry.payout_id === requestBody.payout_id));
+
+    const stripeProviderResponse = await injectRequest(app, {
+      method: 'GET',
+      url: '/api/admin/payouts?provider=stripe&pageSize=5',
+      headers: bearerHeaders(adminToken)
+    });
+
+    assert.equal(stripeProviderResponse.status, 200);
+    assert.equal(stripeProviderResponse.json().data.some((entry) => entry.payout_id === requestBody.payout_id), false);
   });
 
   test('PayPal payout item webhooks trigger payout resync through official PayPal endpoints', async () => {
@@ -3695,8 +5773,12 @@ describe('API integration flows', () => {
         attempts_made: 5,
         failed_reason: 'Provider timeout',
         queue_name: 'dead-letter',
+        source_queue: 'payout-process',
+        source_job_id: 'payout-job-1',
+        recovery: null,
         data: {
-          queueName: 'payout-process',
+          sourceQueue: 'payout-process',
+          sourceJobId: 'payout-job-1',
           payload: {
             payoutId: 'payout-1'
           }
@@ -3705,6 +5787,42 @@ describe('API integration flows', () => {
         finished_at: '2026-05-05T00:01:00.000Z'
       }
     ];
+    opsService.recoverDeadLetterJob = async (jobId, input) => ({
+      dead_letter: {
+        job_id: jobId,
+        name: 'payout-process-dead-letter',
+        attempts_made: 5,
+        failed_reason: 'Provider timeout',
+        queue_name: 'dead-letter',
+        source_queue: 'payout-process',
+        source_job_id: 'payout-job-1',
+        recovery: {
+          recoveredAt: '2026-05-05T00:02:00.000Z',
+          recoveredByActorId: input.adminActorId,
+          note: input.note,
+          recoveryJobId: 'recovered-job-1',
+          recoveryJobName: 'process-approved-payout',
+          sourceQueue: 'payout-process'
+        },
+        data: {
+          sourceQueue: 'payout-process',
+          sourceJobId: 'payout-job-1',
+          payload: {
+            payoutId: 'payout-1'
+          }
+        },
+        created_at: '2026-05-05T00:00:00.000Z',
+        finished_at: '2026-05-05T00:01:00.000Z'
+      },
+      recovery: {
+        recovered_at: '2026-05-05T00:02:00.000Z',
+        recovered_by_actor_id: input.adminActorId,
+        note: input.note,
+        source_queue: 'payout-process',
+        recovery_job_id: 'recovered-job-1',
+        recovery_job_name: 'process-approved-payout'
+      }
+    });
 
     const queueResponse = await injectRequest(app, {
       method: 'GET',
@@ -3730,9 +5848,36 @@ describe('API integration flows', () => {
     assert.equal(deadLetterBody.data.length, 1);
     assert.equal(deadLetterBody.data[0].job_id, '17');
     assert.equal(deadLetterBody.data[0].queue_name, 'dead-letter');
+    assert.equal(deadLetterBody.data[0].source_queue, 'payout-process');
+
+    const recoveryPayload = JSON.stringify({ note: 'retry after provider incident' });
+    const recoveryResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/admin/dead-letters/17/recover',
+      headers: jsonHeaders(recoveryPayload, bearerHeaders(adminToken)),
+      body: recoveryPayload
+    });
+
+    assert.equal(recoveryResponse.status, 200);
+    const recoveryBody = recoveryResponse.json();
+    assert.equal(recoveryBody.dead_letter.job_id, '17');
+    assert.equal(recoveryBody.recovery.source_queue, 'payout-process');
+    assert.equal(recoveryBody.recovery.recovery_job_name, 'process-approved-payout');
+    assert.equal(recoveryBody.recovery.note, 'retry after provider incident');
+
+    const retryResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/api/admin/dead-letters/17/retry',
+      headers: jsonHeaders(recoveryPayload, bearerHeaders(adminToken)),
+      body: recoveryPayload
+    });
+
+    assert.equal(retryResponse.status, 200);
+    assert.equal(retryResponse.json().recovery.recovery_job_id, 'recovered-job-1');
 
     opsService.getQueueOverview = originalGetQueueOverview;
     opsService.listDeadLetterJobs = originalListDeadLetterJobs;
+    opsService.recoverDeadLetterJob = originalRecoverDeadLetterJob;
   });
 
   test('admin reconciliation trigger refreshes reconcilable invoice state through official PayPal sync', async () => {
@@ -4005,6 +6150,16 @@ describe('API integration flows', () => {
     assert.equal(duplicateResponse.status, 200);
     const duplicateBody = duplicateResponse.json();
     assert.equal(duplicateBody.duplicate, true);
+
+    const unsignedDuplicateResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/paypal',
+      headers: jsonHeaders(firstPayload),
+      body: firstPayload
+    });
+
+    assert.equal(unsignedDuplicateResponse.status, 400);
+    assert.equal(unsignedDuplicateResponse.json().code, 'VALIDATION_ERROR');
 
     const webhookEvent = await webhookEventRepository.findByEventId('WH-EVENT-1');
     assert.ok(webhookEvent);

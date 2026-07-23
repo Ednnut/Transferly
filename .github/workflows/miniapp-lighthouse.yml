@@ -1,0 +1,43 @@
+name: MiniApp Lighthouse CI
+
+on:
+  pull_request:
+    paths:
+      - 'miniapp/**'
+  push:
+    branches: [ main ]
+    paths:
+      - 'miniapp/**'
+
+jobs:
+  lighthouse:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+
+      - name: Install miniapp dependencies
+        run: npm ci --prefix miniapp
+
+      - name: Build miniapp
+        run: npm run build --prefix miniapp
+
+      - name: Install http-server and LHCI
+        run: npm ci -g http-server @lhci/cli || npm i -g http-server @lhci/cli
+
+      - name: Serve miniapp (background)
+        run: npx http-server miniapp/dist -p 4173 &
+
+      - name: Run LHCI autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN || '' }}
+        run: npx @lhci/cli autorun --config=.lighthouserc.json
+
+      - name: Upload LHCI report (temporary public URL)
+        if: always()
+        run: echo "LHCI report uploaded to temporary-public-storage (check action logs for URL)"

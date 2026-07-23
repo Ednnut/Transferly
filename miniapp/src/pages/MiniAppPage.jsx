@@ -56,6 +56,19 @@ const ProviderCommandCenter = lazy(() => import('../components/MiniAppFinanceSui
 const RiskSection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.RiskSection })));
 const SecuritySection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.SecuritySection })));
 
+// Loading fallbacks
+import LoadingFallback from '../components/ui/LoadingFallback';
+
+// Prefetch helpers: dynamically import chunks on demand (hover or programmatic prefetch)
+function prefetchProviderWorkspace() {
+  import('../components/ProviderWorkspaceFoundation');
+  import('../components/MiniAppFinanceSuite').then((m) => m.ProviderCommandCenter && m.ProviderCommandCenter);
+}
+
+function prefetchFinanceSections() {
+  import('../components/MiniAppFinanceSuite');
+}
+
 import { useAppContext } from '../context/AppContext';
 import { useTelegramMiniApp } from '../context/TelegramMiniAppContext';
 import {
@@ -597,6 +610,8 @@ function ProviderDock() {
           <Link
             key={provider.slug}
             to={getProviderWorkspaceRoute(provider.slug)}
+            onMouseEnter={prefetchProviderWorkspace}
+            onFocus={prefetchProviderWorkspace}
             className="rounded-[24px] bg-[var(--tg-secondary-bg-color)] p-4 transition active:scale-[0.99]"
           >
             <div className="flex items-center justify-between gap-3">
@@ -796,6 +811,8 @@ function HeroPanel({ profile, telegram, receipts, topUpOrders }) {
                   <Link
                     key={item.label}
                     to={item.to}
+                    onMouseEnter={prefetchFinanceSections}
+                    onFocus={prefetchFinanceSections}
                     className="miniapp-pressable rounded-[24px] border border-white/10 bg-white/[0.13] p-3 text-white backdrop-blur"
                   >
                     <Icon size={18} />
@@ -3146,6 +3163,8 @@ function MiniAppMailServicePicker({ service }) {
         {showProviderLink ? (
           <Link
             to={providerTarget}
+            onMouseEnter={prefetchProviderWorkspace}
+            onFocus={prefetchProviderWorkspace}
             className="mt-5 inline-flex items-center justify-center gap-2 rounded-full bg-[var(--tg-button-color)] px-4 py-3 text-xs font-black text-[var(--tg-button-text-color)] transition active:scale-95"
           >
             Open {service.title} provider workspace
@@ -3322,6 +3341,8 @@ function MiniAppServiceDetail({ slug, profile, config }) {
               <Link
                 key={related.slug}
                 to={getMiniAppServiceTarget(related)}
+                onMouseEnter={prefetchProviderWorkspace}
+                onFocus={prefetchProviderWorkspace}
                 className="rounded-[24px] bg-[var(--tg-section-bg-color)] p-3 text-center text-[var(--tg-text-color)] transition active:scale-[0.98]"
               >
                 <ServiceLogo service={related} size="md" className="mx-auto" />
@@ -4174,23 +4195,75 @@ export default function MiniAppPage() {
       {activeSection === 'services' ? (
         activeServiceSlug
           ? isProviderWorkspaceRoute
-            ? <ProviderWorkspaceFoundation slug={activeServiceSlug} lane={activeProviderLane} />
+            ? (
+              <React.Suspense fallback={<LoadingFallback variant="dashboard" />}>
+                <ProviderWorkspaceFoundation slug={activeServiceSlug} lane={activeProviderLane} />
+              </React.Suspense>
+            )
             : <MiniAppServiceDetail slug={activeServiceSlug} profile={profile} config={config} />
           : <ServicesSection />
       ) : null}
-      {activeSection === 'studio' ? <MiniAppReceiptStudio /> : null}
-      {activeSection === 'invoices' ? <InvoicesSection /> : null}
-      {activeSection === 'payouts' ? <PayoutsSection /> : null}
-      {activeSection === 'activity' ? <ActivitySection /> : null}
-      {activeSection === 'analytics' ? <AnalyticsSection /> : null}
-      {activeSection === 'notifications' ? <NotificationsSection /> : null}
-      {activeSection === 'clients' ? <ClientsSection /> : null}
-      {activeSection === 'risk' ? <RiskSection /> : null}
-      {activeSection === 'security' ? <SecuritySection /> : null}
-      {activeSection === 'vault' ? <MiniAppReceiptVault /> : null}
+      {activeSection === 'studio' ? (
+        <React.Suspense fallback={<LoadingFallback variant="dashboard" />}>
+          <MiniAppReceiptStudio />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'invoices' ? (
+        <React.Suspense fallback={<LoadingFallback variant="dashboard" />}>
+          <InvoicesSection />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'payouts' ? (
+        <React.Suspense fallback={<LoadingFallback variant="dashboard" />}>
+          <PayoutsSection />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'activity' ? (
+        <React.Suspense fallback={<LoadingFallback variant="dashboard" />}>
+          <ActivitySection />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'analytics' ? (
+        <React.Suspense fallback={<LoadingFallback variant="dashboard" />}>
+          <AnalyticsSection />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'notifications' ? (
+        <React.Suspense fallback={<LoadingFallback variant="card" count={3} />}>
+          <NotificationsSection />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'clients' ? (
+        <React.Suspense fallback={<LoadingFallback variant="card" count={4} />}>
+          <ClientsSection />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'risk' ? (
+        <React.Suspense fallback={<LoadingFallback variant="card" count={3} />}>
+          <RiskSection />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'security' ? (
+        <React.Suspense fallback={<LoadingFallback variant="card" count={2} />}>
+          <SecuritySection />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'vault' ? (
+        <React.Suspense fallback={<LoadingFallback variant="dashboard" />}>
+          <MiniAppReceiptVault />
+        </React.Suspense>
+      ) : null}
       {activeSection === 'orders' ? <OrdersSection topUpOrders={topUpOrders} telegram={telegram} /> : null}
-      {activeSection === 'wallet' ? <MiniAppPointsWallet /> : null}
-      {activeSection === 'ops' ? <ProviderCommandCenter /> : null}
+      {activeSection === 'wallet' ? (
+        <React.Suspense fallback={<LoadingFallback variant="card" count={2} />}>
+          <MiniAppPointsWallet />
+        </React.Suspense>
+      ) : null}
+      {activeSection === 'ops' ? (
+        <React.Suspense fallback={<LoadingFallback variant="dashboard" />}>
+          <ProviderCommandCenter />
+        </React.Suspense>
+      ) : null}
       {activeSection === 'support' ? (
         <SupportSection
           telegram={telegram}

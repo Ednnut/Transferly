@@ -26,5 +26,8 @@
     "miniapp:dev": "npm run dev --prefix miniapp",
     "miniapp:e2e": "npm run test:e2e --prefix miniapp",
     "miniapp:e2e:list": "npm run test:e2e:list --prefix miniapp"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5"
   }
 }

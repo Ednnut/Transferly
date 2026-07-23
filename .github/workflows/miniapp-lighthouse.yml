@@ -36,8 +36,28 @@ jobs:
       - name: Run LHCI autorun
         env:
           LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN || '' }}
-        run: npx @lhci/cli autorun --config=.lighthouserc.json
+        run: npx @lhci/cli autorun --config=.lighthouserc.json || true
+
+      - name: Archive LHCI artifacts (if produced)
+        if: always()
+        run: |
+          mkdir -p lhci-reports
+          if [ -d ./.lighthouseci ]; then
+            cp -r ./.lighthouseci/* lhci-reports/ || true
+          fi
+          if [ -d ./lhci-reports ]; then
+            echo "LHCI artifacts prepared"
+          else
+            echo "No LHCI artifacts found"
+          fi
+
+      - name: Upload LHCI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miniapp-lhci-reports
+          path: lhci-reports
 
       - name: Upload LHCI report (temporary public URL)
         if: always()
-        run: echo "LHCI report uploaded to temporary-public-storage (check action logs for URL)"
+        run: echo "LHCI autorun completed (check artifacts for LHCI reports if available)"

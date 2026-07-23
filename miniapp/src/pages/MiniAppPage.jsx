@@ -807,6 +807,20 @@ function HeroPanel({ profile, telegram, receipts, topUpOrders }) {
     { label: 'Resolve', icon: ShieldCheck, active: telegram.available }
   ];
 
+  // Enable viewport-based prefetching on mount for better mobile/keyboard coverage.
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    try {
+      const cleanup = setupPrefetchOnViewport(document);
+      return () => cleanup && cleanup();
+    } catch (e) {
+      // non-fatal: do not block render
+      // eslint-disable-next-line no-console
+      console.warn('Viewport prefetch setup failed', e);
+      return undefined;
+    }
+  }, []);
+
   return (
     <section className="space-y-4 miniapp-enter">
       <div className="miniapp-command-hero relative overflow-hidden rounded-[32px] border border-[var(--miniapp-border-color)] p-5 text-white shadow-[0_28px_80px_rgba(0,0,0,0.34)] sm:p-6">

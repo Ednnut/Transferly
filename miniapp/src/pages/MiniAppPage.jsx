@@ -60,13 +60,56 @@ const SecuritySection = lazy(() => import('../components/MiniAppFinanceSuite').t
 import LoadingFallback from '../components/ui/LoadingFallback';
 
 // Prefetch helpers: dynamically import chunks on demand (hover or programmatic prefetch)
+let _financePrefetched = false;
+let _providerPrefetched = false;
+
+function isConnectionFastEnough() {
+  try {
+    const nav = navigator && (navigator.connection || navigator.mozConnection || navigator.webkitConnection);
+    if (!nav) return true; // unknown, allow
+    const effective = nav.effectiveType || '';
+    // effectiveType values: 'slow-2g', '2g', '3g', '4g'
+    return !/^(slow-2g|2g)$/.test(effective);
+  } catch (e) {
+    return true;
+  }
+}
+
 function prefetchProviderWorkspace() {
+  if (!isConnectionFastEnough() || _providerPrefetched) return;
+  _providerPrefetched = true;
   import('../components/ProviderWorkspaceFoundation');
   import('../components/MiniAppFinanceSuite').then((m) => m.ProviderCommandCenter && m.ProviderCommandCenter);
 }
 
 function prefetchFinanceSections() {
+  if (!isConnectionFastEnough() || _financePrefetched) return;
+  _financePrefetched = true;
   import('../components/MiniAppFinanceSuite');
+}
+
+// IntersectionObserver-based prefetch for in-viewport links (improves mobile/keyboard coverage)
+function setupPrefetchOnViewport(root = document) {
+  if (typeof IntersectionObserver === 'undefined') return () => {};
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const el = entry.target;
+        const prefetch = el.getAttribute && el.getAttribute('data-prefetch');
+        if (!prefetch) return;
+        if (prefetch === 'finance') prefetchFinanceSections();
+        if (prefetch === 'provider') prefetchProviderWorkspace();
+        observer.unobserve(el);
+      });
+    },
+    { rootMargin: '300px' }
+  );
+
+  const els = Array.from(root.querySelectorAll('[data-prefetch]'));
+  els.forEach((el) => observer.observe(el));
+
+  return () => observer.disconnect();
 }
 
 import { useAppContext } from '../context/AppContext';
@@ -790,6 +833,9 @@ function HeroPanel({ profile, telegram, receipts, topUpOrders }) {
               </div>
               <Link
                 to="/miniapp/wallet"
+                data-prefetch="provider"
+                onMouseEnter={prefetchProviderWorkspace}
+                onFocus={prefetchProviderWorkspace}
                 className="miniapp-pressable inline-flex shrink-0 items-center justify-center gap-2 rounded-[8px] bg-[var(--tg-button-color)] px-5 py-3 text-sm font-black text-[var(--tg-button-text-color)] shadow-[0_18px_44px_rgba(0,0,0,0.24)]"
               >
                 <Zap size={17} />
@@ -813,6 +859,7 @@ function HeroPanel({ profile, telegram, receipts, topUpOrders }) {
                     to={item.to}
                     onMouseEnter={prefetchFinanceSections}
                     onFocus={prefetchFinanceSections}
+                    data-prefetch="finance"
                     className="miniapp-pressable rounded-[24px] border border-white/10 bg-white/[0.13] p-3 text-white backdrop-blur"
                   >
                     <Icon size={18} />

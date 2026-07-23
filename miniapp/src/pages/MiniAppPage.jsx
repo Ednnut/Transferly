@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   Activity,
@@ -37,23 +37,25 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import MiniAppShell from '../components/MiniAppShell';
-import MiniAppPointsWallet from '../components/MiniAppPointsWallet';
-import MiniAppReceiptStudio from '../components/MiniAppReceiptStudio';
-import MiniAppReceiptVault from '../components/MiniAppReceiptVault';
 import { SessionHealthStrip, TelegramLaunchNotice } from '../components/miniapp/MiniAppSessionStatus';
-import ProviderWorkspaceFoundation from '../components/ProviderWorkspaceFoundation';
 import ServiceLogo from '../components/ServiceLogo';
-import {
-  ActivitySection,
-  AnalyticsSection,
-  ClientsSection,
-  InvoicesSection,
-  NotificationsSection,
-  PayoutsSection,
-  ProviderCommandCenter,
-  RiskSection,
-  SecuritySection
-} from '../components/MiniAppFinanceSuite';
+// Lazy-load heavy miniapp sections and feature components for route-based code-splitting
+const MiniAppPointsWallet = lazy(() => import('../components/MiniAppPointsWallet'));
+const MiniAppReceiptStudio = lazy(() => import('../components/MiniAppReceiptStudio'));
+const MiniAppReceiptVault = lazy(() => import('../components/MiniAppReceiptVault'));
+const ProviderWorkspaceFoundation = lazy(() => import('../components/ProviderWorkspaceFoundation'));
+
+// Named exports from MiniAppFinanceSuite are lazy-wrapped so each section becomes a separate chunk
+const ActivitySection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.ActivitySection })));
+const AnalyticsSection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.AnalyticsSection })));
+const ClientsSection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.ClientsSection })));
+const InvoicesSection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.InvoicesSection })));
+const NotificationsSection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.NotificationsSection })));
+const PayoutsSection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.PayoutsSection })));
+const ProviderCommandCenter = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.ProviderCommandCenter })));
+const RiskSection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.RiskSection })));
+const SecuritySection = lazy(() => import('../components/MiniAppFinanceSuite').then((m) => ({ default: m.SecuritySection })));
+
 import { useAppContext } from '../context/AppContext';
 import { useTelegramMiniApp } from '../context/TelegramMiniAppContext';
 import {

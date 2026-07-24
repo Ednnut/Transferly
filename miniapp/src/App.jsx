@@ -4,6 +4,15 @@ import { Toaster } from 'react-hot-toast';
 import { AppContextProvider } from './context/AppContext';
 import { MiniAppRuntimeProvider } from './context/MiniAppRuntimeContext';
 import { TelegramMiniAppProvider } from './context/TelegramMiniAppContext';
+import { ProviderRegistryProvider } from './providers';
+import paypalProvider from './providers/paypal';
+import stripeProvider from './providers/stripe';
+import wiseProvider from './providers/wise';
+import paystackProvider from './providers/paystack';
+import flutterwaveProvider from './providers/flutterwave';
+import cryptoProvider from './providers/crypto';
+
+const ALL_PROVIDERS = [paypalProvider, stripeProvider, wiseProvider, paystackProvider, flutterwaveProvider, cryptoProvider];
 import { AdminRoute } from './components/AdminRoute';
 import { MiniAppRuntimeGate } from './components/MiniAppRuntimeGate';
 import { MiniAppState } from './components/MiniAppState';
@@ -207,9 +216,11 @@ function App() {
     <TelegramMiniAppProvider>
       <AppContextProvider>
         <MiniAppRuntimeProvider>
-          <Router future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
-            <AppFrame />
-          </Router>
+          <ProviderRegistryProvider initialProviders={ALL_PROVIDERS}>
+            <Router future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+              <AppFrame />
+            </Router>
+          </ProviderRegistryProvider>
         </MiniAppRuntimeProvider>
       </AppContextProvider>
     </TelegramMiniAppProvider>

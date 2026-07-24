@@ -4,6 +4,7 @@ const { fixtures } = require('./fixtures');
 
 module.exports = createProviderWorkspaceModule({
   key: 'flutterwave',
+  order: 50,
   adapter: flutterwaveProviderAdapter,
   fixtures
 });

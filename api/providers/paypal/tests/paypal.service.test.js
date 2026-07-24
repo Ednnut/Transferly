@@ -1,9 +1,9 @@
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
 const PayPalService = require('../service');
 
-describe('PayPalService (smoke)', () => {
-  test('listTransactions returns an object', async () => {
-    const svc = new PayPalService({ config: {} });
-    const res = await svc.listTransactions();
-    expect(res).toBeDefined();
-  });
+test('PayPalService listTransactions returns an object', async () => {
+  const svc = new PayPalService({ config: {} });
+  const res = await svc.listTransactions();
+  assert.ok(res);
 });

@@ -14,7 +14,7 @@ const defaults = {
   PAYPAL_CLIENT_ID: 'paypal-test-client',
   PAYPAL_CLIENT_SECRET: 'paypal-test-secret',
   PAYPAL_WEBHOOK_ID: 'paypal-webhook-id',
-  JWT_SECRET: 'test-jwt-secret',
+  JWT_SECRET: 'test-jwt-secret-value',
   REDIS_URL: 'redis://127.0.0.1:6379',
   SQLITE_DATABASE_PATH: './data/test.sqlite',
   ADMIN_API_TOKEN: 'admin-test-token',
@@ -28,6 +28,5 @@ Object.keys(defaults).forEach((k) => {
 
 // Provide a simple debug print when running tests locally (only in non-CI)
 if (!process.env.CI) {
-  // eslint-disable-next-line no-console
   console.log('Test env variables loaded from setup-test-env:', Object.keys(defaults).filter(k => process.env[k] === defaults[k]));
 }

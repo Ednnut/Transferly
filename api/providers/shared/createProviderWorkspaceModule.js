@@ -1,4 +1,4 @@
-function createProviderWorkspaceModule({ key, adapter, fixtures = {} }) {
+function createProviderWorkspaceModule({ key, adapter, fixtures = {}, order = Number.MAX_SAFE_INTEGER }) {
   if (!key) {
     throw new Error('Provider workspace module requires a key.');
   }
@@ -26,6 +26,7 @@ function createProviderWorkspaceModule({ key, adapter, fixtures = {} }) {
 
   return Object.freeze({
     key,
+    order,
     adapter,
     fixtures,
     getContract,

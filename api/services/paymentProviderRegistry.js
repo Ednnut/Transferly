@@ -1,24 +1,11 @@
-const { paymentProviderAdapters } = require('../adapters/paymentProviders');
-const { AppError } = require('../utils/errors');
-
-const adaptersByKey = new Map(paymentProviderAdapters.map((adapter) => [adapter.key, adapter]));
+const { providerModuleRegistry } = require('../providers/moduleRegistry');
 
 function listProviders() {
-  return paymentProviderAdapters.map((adapter) => adapter.getSummary());
+  return providerModuleRegistry.list().map((provider) => provider.adapter.getSummary());
 }
 
 function getProvider(providerKey) {
-  const normalizedKey = String(providerKey || '').trim().toLowerCase();
-  const adapter = adaptersByKey.get(normalizedKey);
-
-  if (!adapter) {
-    throw new AppError(404, 'PAYMENT_PROVIDER_NOT_FOUND', 'Payment provider not found.', {
-      provider: providerKey,
-      available_providers: paymentProviderAdapters.map((entry) => entry.key)
-    });
-  }
-
-  return adapter;
+  return providerModuleRegistry.get(providerKey).adapter;
 }
 
 function getProviderStatus(providerKey) {
@@ -26,7 +13,7 @@ function getProviderStatus(providerKey) {
 }
 
 function listInvoiceFeatures() {
-  return paymentProviderAdapters.map((adapter) => adapter.getInvoiceFeatures());
+  return providerModuleRegistry.list().map((provider) => provider.adapter.getInvoiceFeatures());
 }
 
 function getProviderInvoiceFeatures(providerKey) {
@@ -34,7 +21,7 @@ function getProviderInvoiceFeatures(providerKey) {
 }
 
 function listProviderAdapterContracts() {
-  return paymentProviderAdapters.map((adapter) => adapter.getAdapterContract());
+  return providerModuleRegistry.list().map((provider) => provider.adapter.getAdapterContract());
 }
 
 function getProviderAdapterContract(providerKey) {

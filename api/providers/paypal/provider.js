@@ -7,10 +7,9 @@ class PayPalProvider extends BaseProvider {
 
   createClient() {
     // Lightweight client stub — providers should implement robust clients with retries, timeouts
-    const cfg = this.config;
     return {
       getBalance: async () => ({ available: 0, pending: 0 }),
-      fetchTransactions: async (opts = {}) => ({ items: [], nextPage: null })
+      fetchTransactions: async (_opts = {}) => ({ items: [], nextPage: null })
     };
   }
 

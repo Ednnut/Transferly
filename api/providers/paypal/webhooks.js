@@ -6,7 +6,6 @@ const router = express.Router();
 router.post('/paypal', (req, res) => {
   // Providers should verify signature using PAYPAL_WEBHOOK_ID and secret
   // Non-destructive stub: log and ack
-  // eslint-disable-next-line no-console
   console.info('Received paypal webhook', { headers: req.headers });
   res.status(200).send({ ok: true });
 });

@@ -90,7 +90,8 @@ const envSchema = z.object({
   SEED_ADMIN_ACTOR_ID: z.string().min(1).optional(),
   TRANSFERLY_OWNER_TELEGRAM_USER_IDS: z.string().default(''),
   TRANSFERLY_ADMIN_TELEGRAM_USER_IDS: z.string().default(''),
-  SERVICE_FEATURE_FLAGS: z.string().default('')
+  SERVICE_FEATURE_FLAGS: z.string().default(''),
+  PAYMENT_PROVIDER_FEATURE_FLAGS: z.string().default('')
 });
 
 const parsed = envSchema.parse(process.env);
@@ -191,6 +192,7 @@ module.exports = {
   OWNER_TELEGRAM_USER_IDS: parseTelegramUserIds(parsed.TRANSFERLY_OWNER_TELEGRAM_USER_IDS),
   ADMIN_TELEGRAM_USER_IDS: parseTelegramUserIds(parsed.TRANSFERLY_ADMIN_TELEGRAM_USER_IDS),
   ENABLED_SERVICE_FEATURE_FLAGS: new Set(splitCsv(parsed.SERVICE_FEATURE_FLAGS)),
+  ENABLED_PAYMENT_PROVIDERS: new Set(splitCsv(parsed.PAYMENT_PROVIDER_FEATURE_FLAGS, (entry) => entry.toLowerCase())),
   HIGH_RISK_COUNTRIES: splitCsv(parsed.HIGH_RISK_COUNTRIES, (entry) => entry.toUpperCase()),
   HIGH_RISK_CURRENCIES: splitCsv(parsed.HIGH_RISK_CURRENCIES, (entry) => entry.toUpperCase()),
   SUSPICIOUS_INVOICE_KEYWORDS: splitCsv(parsed.SUSPICIOUS_INVOICE_KEYWORDS, (entry) => entry.toLowerCase())

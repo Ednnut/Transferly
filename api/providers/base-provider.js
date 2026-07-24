@@ -28,11 +28,11 @@ class BaseProvider {
   }
 
   // Service operations
-  async fetchTransactions(opts = {}) {
+  async fetchTransactions(_opts = {}) {
     throw new Error('fetchTransactions() not implemented');
   }
 
-  async createPayment(opts = {}) {
+  async createPayment(_opts = {}) {
     throw new Error('createPayment() not implemented');
   }
 

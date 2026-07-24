@@ -4,6 +4,7 @@ const { fixtures } = require('./fixtures');
 
 module.exports = createProviderWorkspaceModule({
   key: 'paystack',
+  order: 40,
   adapter: paystackProviderAdapter,
   fixtures
 });

@@ -123,6 +123,18 @@ const runPaymentReconciliationSchema = z.object({
   payoutLimit: z.coerce.number().int().positive().max(100).optional()
 });
 
+const reconciliationTimelineQuerySchema = z.object({
+  entityType: z.string().trim().min(1).max(64),
+  entityId: z.string().trim().min(1).max(255),
+  limit: z.coerce.number().int().positive().max(200).default(50)
+});
+
+const reconciliationMismatchQuerySchema = z.object({
+  invoiceLimit: z.coerce.number().int().positive().max(200).default(50),
+  payoutLimit: z.coerce.number().int().positive().max(200).default(50),
+  webhookLimit: z.coerce.number().int().positive().max(200).default(100)
+});
+
 const listPaymentOpsIssuesQuerySchema = z.object({
   status: z.string().trim().min(1).optional(),
   entityType: z.string().trim().min(1).optional(),
@@ -322,6 +334,8 @@ module.exports = {
   stripeConnectedAccountListQuerySchema,
   stripeConnectedAccountParamsSchema,
   runPaymentReconciliationSchema,
+  reconciliationTimelineQuerySchema,
+  reconciliationMismatchQuerySchema,
   topUpOrderAdminActionSchema,
   topUpOrderParamsSchema,
   listAdminPayoutsQuerySchema,

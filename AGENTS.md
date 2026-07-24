@@ -18,12 +18,84 @@
 - Do not expose PayPal secrets, bearer tokens, webhook headers, or raw event payloads in logs.
 - Do not commit real `.env` files, production SQLite data, tokens, or service-role keys.
 
+## Skill Selection Guide
+
+Use the task-specific skill from `~/.codex/skills/` when it matches the work:
+
+| Task | Skill |
+|------|-------|
+| HTTP endpoints, webhooks, Zod schemas, provider adapters | `intent-api` |
+| Security review, auth changes, secret handling, threat analysis | `intent-security` |
+| Production readiness, launch gates, post-incident review | `intent-production-audit` |
+| Exceptions, flaky tests, regressions, unexpected behavior | `intent-debug` |
+| Schema changes, backfills, constraints, migration failures | `intent-migrations` |
+| New modules, code generation, scaffolding | `intent-codegen` |
+| Code review, maintainability, refactoring | `intent-review` / `intent-refactor` |
+| Release candidates, go/no-go decisions, release notes | `intent-release` |
+| EC2/PM2 deployment, environment config, rollout plans | `intent-deploy` |
+| Playwright e2e tests, visual regression, browser automation | `intent-playwright` |
+| Mini App React/Tailwind/Supabase work | `intent-miniapp` |
+| Telegram bot commands, callbacks, session state | `intent-bot` |
+| Frontend components, accessibility, responsive layouts | `intent-frontend` / `intent-uiux` |
+| Build pipeline, bundle checks, CI configuration | `intent-build` |
+| Performance profiling, query optimization, bundle size | `intent-performance` |
+| Research synthesis, provider docs, external API behavior | `intent-research` |
+| Unit/integration test coverage | `intent-test` |
+| Documentation artifacts | `intent-docs` |
+
+Invoke explicitly when useful: `Use $intent-api to add this endpoint.`
+
 ## Deep Work Defaults
 - Inspect the owning package plus at least one local analog before editing.
 - Trace impacted routes, services, repositories, tests, and UI entry points when a change crosses package or payment boundaries.
 - Prefer `rg`, package scripts, and existing helper scripts for broad checks before adding new tooling.
 - When a first verification check passes, run the next most relevant check if the change affects shared behavior, payment state, auth, deployment, or user-facing flows.
 - Capture follow-up risks explicitly instead of silently narrowing scope.
+
+## Security Defaults (from `security-best-practices` + `intent-security`)
+
+Apply these at all times — not only during explicit security reviews:
+
+### Input & Validation
+- Validate all external input with Zod at API boundaries; reject unknown fields.
+- Treat webhook payloads, Telegram updates, and provider callbacks as untrusted until verified.
+- Sanitize request URLs before logging (`api/utils/sanitizeRequestUrl.js`).
+
+### Authentication & Authorization
+- Enforce bearer auth on all `/api/admin/*` routes via `ADMIN_API_TOKEN`.
+- Enforce user-scoped bearer auth via `USER_API_TOKENS` on user routes.
+- Verify Telegram Mini App `initData` HMAC before trusting session identity.
+- Never trust `x-admin-actor-id` without prior admin auth middleware.
+
+### Secrets & Logging
+- Never log PayPal client secrets, bearer tokens, webhook headers, or raw sensitive payloads.
+- Never commit `.env` files, production SQLite databases, or service-role keys.
+- Run `npm run scan:secrets` before any release-bound commit.
+
+### Payment & Ledger Safety
+- The internal ledger is the balance source of truth — never trust provider status alone.
+- Wrap all wallet/ledger mutations in SQLite transactions.
+- Use deterministic idempotency keys for payout submission and webhook ingestion.
+- Persist externally meaningful state transitions before acknowledging completion.
+- Record audit logs for: invoice creation, payout requests, approvals/rejections, webhook processing, ledger mutations.
+
+### Webhook Security
+- Verify PayPal webhook signatures using the raw request body before processing.
+- Verify Telegram webhook secret header before processing bot updates.
+- Persist webhook receipts before enqueuing async processing.
+
+### Dependency & Configuration
+- Run `npm audit --omit=dev --prefix <package>` when adding or updating dependencies.
+- Validate required environment variables at startup; fail fast with a clear error.
+- Keep `INLINE_QUEUE_MODE=true` only for tests — never in production.
+
+## Backend Conventions
+- Use idempotency for payout submission and webhook ingestion.
+- Persist every externally meaningful state transition in the database before acknowledging it as complete.
+- Trust the internal ledger for balances, not PayPal resource status alone.
+- Wrap balance-changing operations in database transactions.
+- Record audit logs for invoice creation, payout requests, approval/rejection actions, webhook processing, and ledger mutations.
+- Prefer enum-backed state machines over free-form status strings when data is persisted.
 
 ## Project Codex Toolkit
 - Use project-local skills in `.codex/skills/` for reusable workflows that are not Transferly-specific, including research synthesis, maintainability review, JSON repair, API rate-limit handling, correlated debugging, regression planning, release readiness, browser research, tool management, and Codex environment validation.
@@ -38,14 +110,6 @@
 - For PayPal invoice, payout, OAuth, webhook, or provider adapter contract changes, consult the nearest local reference and official provider docs when endpoint behavior, payload shape, auth, idempotency, or webhook verification is relevant.
 - For new modules or cross-package infrastructure, consult `docs/codex/references/project-architecture.md` when the existing package layout does not make ownership clear.
 - If docs and local code disagree on an externally meaningful behavior, call out the mismatch before patching.
-
-## Backend Conventions
-- Use idempotency for payout submission and webhook ingestion.
-- Persist every externally meaningful state transition in the database before acknowledging it as complete.
-- Trust the internal ledger for balances, not PayPal resource status alone.
-- Wrap balance-changing operations in database transactions.
-- Record audit logs for invoice creation, payout requests, approval/rejection actions, webhook processing, and ledger mutations.
-- Prefer enum-backed state machines over free-form status strings when data is persisted.
 
 ## Verification
 - Use the fastest relevant checks first.
@@ -70,3 +134,23 @@
   - `npm run scan:secrets`
   - `npm run verify:release`
 - If a check cannot run, state the exact missing prerequisite.
+
+## Workflow: Inspect → Plan → Implement → Test → Verify → Refine → Report
+
+### Inspect
+- Read `AGENTS.md`, the owning package, and a local analog before editing.
+- For API work, trace routes → controllers → services → repositories → schemas → jobs → tests.
+- For payment, webhook, OAuth, or provider behavior, consult the nearest local provider reference.
+
+### Plan & Implement
+- Keep the diff focused; preserve module ownership.
+- Reuse shared helpers; avoid duplicate logic.
+- HTTP transport in routes/controllers, business logic in services, persistence in repositories, side effects in adapters/jobs/webhooks.
+
+### Test & Verify
+- Run the fastest affected check first, then widen for shared/payment/auth/deployment changes.
+- Never represent unrun checks as passing.
+
+### Report
+- State the change, validation actually run, blocked checks with prerequisites, and remaining risks.
+- Never include secrets, tokens, webhook headers, or raw sensitive payloads in reports or logs.

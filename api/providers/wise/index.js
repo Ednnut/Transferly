@@ -4,6 +4,7 @@ const { fixtures } = require('./fixtures');
 
 module.exports = createProviderWorkspaceModule({
   key: 'wise',
+  order: 30,
   adapter: wiseProviderAdapter,
   fixtures
 });

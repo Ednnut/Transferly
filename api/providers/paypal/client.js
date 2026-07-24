@@ -21,7 +21,7 @@ class PayPalClient {
     return res.data;
   }
 
-  async listTransactions(params = {}) {
+  async listTransactions(_params = {}) {
     const res = await this.fetch('/v1/reporting/transactions');
     return res.data || { transactions: [] };
   }

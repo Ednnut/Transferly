@@ -4,7 +4,6 @@ async function processWebhookEvent(job) {
   const { event } = job.data;
   // Non-destructive: log and acknowledge
   // In production: verify event, dedupe, dispatch to service layer
-  // eslint-disable-next-line no-console
   console.info('Processing PayPal webhook event', event);
   return { ok: true };
 }

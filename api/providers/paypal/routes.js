@@ -8,7 +8,7 @@ router.get('/balance', async (req, res) => {
   try {
     const data = await service.getBalance();
     res.json({ ok: true, data });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ ok: false, error: 'Failed to fetch balance' });
   }
 });
@@ -17,7 +17,7 @@ router.get('/transactions', async (req, res) => {
   try {
     const data = await service.listTransactions(req.query);
     res.json({ ok: true, data });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ ok: false, error: 'Failed to fetch transactions' });
   }
 });

@@ -13,6 +13,7 @@ const schemas = require('./schemas');
 module.exports = {
   ...createProviderWorkspaceModule({
     key: 'paypal',
+    order: 10,
     adapter: paypalProviderAdapter,
     fixtures
   }),

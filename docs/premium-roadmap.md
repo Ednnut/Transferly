@@ -194,9 +194,11 @@ Status: Phase 1 implemented in the mini app service detail route using existing 
 5. **Reconciliation Timeline**
    - Add a unified timeline that joins invoices, payouts, webhooks, audit logs, and ledger entries.
    - Add mismatch detection and operator-facing remediation hints.
+   - Status: Implemented. GET /api/admin/reconciliation/timeline and GET /api/admin/reconciliation/mismatches wired to reconciliationTimelineService.
 
 6. **Risk And Approval Operations**
    - Add richer payout risk queues, manual holds, operator assignment, approval notes, and rule-driven escalation.
+   - Status: Manual hold implemented. POST /api/admin/payouts/:id/hold and /unhold with audit logs. Migration 202607240001 adds hold columns. Operator assignment, approval notes, and rule-driven escalation remain.
 
 7. **Advanced User And Finance Workflows**
    - Add customer and recipient profiles, multi-currency wallet views, reporting exports, and scheduled payout operations.

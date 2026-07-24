@@ -17,7 +17,8 @@ const PAYOUT_STATUS = Object.freeze({
   FAILED: 'FAILED',
   PENDING: 'PENDING',
   DENIED: 'DENIED',
-  REJECTED: 'REJECTED'
+  REJECTED: 'REJECTED',
+  ON_HOLD: 'ON_HOLD'
 });
 
 const RISK_DECISION = Object.freeze({

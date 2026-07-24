@@ -304,6 +304,10 @@ const adminInvoiceReminderUpdateSchema = z.object({
   }
 });
 
+const payoutHoldSchema = z.object({
+  reason: z.string().trim().min(1).max(500)
+});
+
 module.exports = {
   adminAdjustUserPointsSchema,
   adminReconcileUserPointsSchema,
@@ -346,5 +350,6 @@ module.exports = {
   webhookEventParamsSchema,
   listDeadLetterJobsQuerySchema,
   deadLetterJobParamsSchema,
-  deadLetterRecoverySchema
+  deadLetterRecoverySchema,
+  payoutHoldSchema
 };

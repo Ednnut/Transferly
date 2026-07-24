@@ -56,7 +56,11 @@ const {
   updateAdminFaqController,
   updateAdminInvoiceTemplateController,
   updateAdminTestimonialController,
-  voidAdminInvoiceController
+  voidAdminInvoiceController,
+  getReconciliationTimelineController,
+  getReconciliationMismatchesController,
+  holdPayoutController,
+  unholdPayoutController
 } = require('../controllers/adminController');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { requireAdminActor } = require('../middleware/requireAdminActor');
@@ -151,6 +155,10 @@ router.get('/dead-letters', requireAdminActor, asyncHandler(listDeadLetterJobsCo
 router.post('/dead-letters/:id/recover', requireAdminActor, asyncHandler(recoverDeadLetterJobController));
 router.post('/dead-letters/:id/retry', requireAdminActor, asyncHandler(recoverDeadLetterJobController));
 router.post('/reconciliation/run', requireAdminActor, asyncHandler(runPaymentReconciliationController));
+router.get('/reconciliation/timeline', requireAdminActor, asyncHandler(getReconciliationTimelineController));
+router.get('/reconciliation/mismatches', requireAdminActor, asyncHandler(getReconciliationMismatchesController));
+router.post('/payouts/:id/hold', requireAdminActor, asyncHandler(holdPayoutController));
+router.post('/payouts/:id/unhold', requireAdminActor, asyncHandler(unholdPayoutController));
 router.patch('/config', requireAdminActor, asyncHandler(updateAdminConfigController));
 router.post('/faqs', requireAdminActor, asyncHandler(createAdminFaqController));
 router.patch('/faqs/:id', requireAdminActor, asyncHandler(updateAdminFaqController));

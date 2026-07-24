@@ -44,6 +44,10 @@ function mapPayout(row) {
     approvedAt: row.approved_at,
     rejectedAt: row.rejected_at,
     processedAt: row.processed_at,
+    onHold: Boolean(row.on_hold),
+    heldByActorId: row.held_by_actor_id,
+    heldAt: row.held_at,
+    holdReason: row.hold_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     payoutBatch: row.payout_batch_join_id
@@ -275,6 +279,22 @@ async function update(id, updates, client = db) {
   if (Object.prototype.hasOwnProperty.call(updates, 'failureReason')) {
     fields.push('failure_reason = ?');
     params.push(updates.failureReason);
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'onHold')) {
+    fields.push('on_hold = ?');
+    params.push(updates.onHold ? 1 : 0);
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'heldByActorId')) {
+    fields.push('held_by_actor_id = ?');
+    params.push(updates.heldByActorId);
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'heldAt')) {
+    fields.push('held_at = ?');
+    params.push(updates.heldAt);
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'holdReason')) {
+    fields.push('hold_reason = ?');
+    params.push(updates.holdReason);
   }
   if (Object.prototype.hasOwnProperty.call(updates, 'metadata')) {
     fields.push('metadata_json = ?');

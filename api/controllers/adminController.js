@@ -38,7 +38,10 @@ const {
   topUpOrderAdminActionSchema,
   topUpOrderParamsSchema,
   webhookEventActionSchema,
-  webhookEventParamsSchema
+  webhookEventParamsSchema,
+  payoutHoldSchema,
+  reconciliationTimelineQuerySchema,
+  reconciliationMismatchQuerySchema
 } = require('../schemas/adminSchemas');
 const {
   presentAdminPayout,
@@ -76,6 +79,7 @@ const { providerPayoutService } = require('../services/providerPayoutService');
 const { slipcraftUserService } = require('../services/slipcraftUserService');
 const { stripeConnectedAccountService } = require('../services/stripeConnectedAccountService');
 const { topUpOrderService } = require('../services/topUpOrderService');
+const { reconciliationTimelineService } = require('../services/reconciliationTimelineService');
 const { AUDIT_ACTOR_TYPE } = require('../utils/constants');
 
 async function approvePayoutController(request, response) {
@@ -674,6 +678,66 @@ async function deleteAdminInvoiceTemplateController(request, response) {
   response.json(result);
 }
 
+async function getReconciliationTimelineController(request, response) {
+  const query = reconciliationTimelineQuerySchema.parse(request.query || {});
+  const timeline = await reconciliationTimelineService.getEntityTimeline(query);
+  response.json(timeline);
+}
+
+async function getReconciliationMismatchesController(request, response) {
+  const query = reconciliationMismatchQuerySchema.parse(request.query || {});
+  const result = await reconciliationTimelineService.detectMismatches(query);
+  response.json(result);
+}
+
+async function holdPayoutController(request, response) {
+  const payout = await payoutRepository.findByIdentifier(request.params.id);
+  if (!payout) {
+    response.status(404).json({ code: 'PAYOUT_NOT_FOUND', message: 'Payout not found.' });
+    return;
+  }
+  const { reason } = payoutHoldSchema.parse(request.body || {});
+  const now = new Date().toISOString();
+  const updated = await payoutRepository.update(payout.id, {
+    onHold: true,
+    heldByActorId: request.adminActorId,
+    heldAt: now,
+    holdReason: reason
+  });
+  await auditLogService.log({
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId,
+    action: 'payout.held',
+    entityType: 'payout',
+    entityId: payout.id,
+    metadata: { reason }
+  });
+  response.json({ payout: updated });
+}
+
+async function unholdPayoutController(request, response) {
+  const payout = await payoutRepository.findByIdentifier(request.params.id);
+  if (!payout) {
+    response.status(404).json({ code: 'PAYOUT_NOT_FOUND', message: 'Payout not found.' });
+    return;
+  }
+  const updated = await payoutRepository.update(payout.id, {
+    onHold: false,
+    heldByActorId: null,
+    heldAt: null,
+    holdReason: null
+  });
+  await auditLogService.log({
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId,
+    action: 'payout.hold_released',
+    entityType: 'payout',
+    entityId: payout.id,
+    metadata: {}
+  });
+  response.json({ payout: updated });
+}
+
 module.exports = {
   acknowledgePaymentOpsIssueController,
   adjustAdminUserPointsController,
@@ -730,5 +794,9 @@ module.exports = {
   updateAdminFaqController,
   updateAdminInvoiceTemplateController,
   updateAdminTestimonialController,
-  voidAdminInvoiceController
+  voidAdminInvoiceController,
+  getReconciliationTimelineController,
+  getReconciliationMismatchesController,
+  holdPayoutController,
+  unholdPayoutController
 };

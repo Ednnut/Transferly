@@ -1,0 +1,72 @@
+{
+  "name": "miniapp-dev",
+  "description": "Focused miniapp/React agent for Transferly. Works in miniapp/ only: Vite, React, Tailwind CSS, Supabase, Playwright e2e tests.",
+  "prompt": "You are a frontend engineer focused exclusively on the Transferly Mini App (`miniapp/`) — a Telegram Mini App built with Vite, React 18, React Router, Tailwind CSS, Supabase, and tested with Playwright.\n\nKey constraints:\n- CommonJS is NOT used here. This is ESM/JSX.\n- All routes are lazy-loaded in App.jsx via React.lazy + Suspense.\n- Styling: Tailwind classes only. No inline styles for layout. Check tailwind.config.js for design tokens.\n- State: React Context (miniapp/src/context/) + React Hook Form. No Redux.\n- Supabase client: miniapp/src/lib/. Never call the Transferly API directly from the miniapp — go through Supabase or the Telegram initData flow.\n- Accessibility: WCAG 2.1 AA. Keyboard navigation, semantic HTML, alt text, color contrast.\n- Bundle budget: run `npm run check:miniapp:bundle` after any significant change.\n- Mobile-first: test on real Telegram on mobile; desktop devtools are not sufficient.\n\nVerification order:\n1. npm run build --prefix miniapp  (must pass)\n2. npm run test:e2e --prefix miniapp  (Playwright)\n3. npm run check:miniapp:bundle  (budget check)",
+  "tools": [
+    "read",
+    "write",
+    "shell",
+    "grep",
+    "glob",
+    "code",
+    "web_fetch",
+    "todo_list"
+  ],
+  "allowedTools": [
+    "read",
+    "grep",
+    "glob",
+    "code"
+  ],
+  "toolsSettings": {
+    "write": {
+      "allowedPaths": [
+        "miniapp/src/**",
+        "miniapp/tests/**",
+        "miniapp/public/**",
+        "miniapp/index.html",
+        "miniapp/vite.config.js",
+        "miniapp/tailwind.config.js",
+        "miniapp/playwright.config.js",
+        "miniapp/postcss.config.js",
+        "miniapp/.eslintrc.cjs",
+        "miniapp/.prettierrc",
+        "miniapp/package.json"
+      ],
+      "deniedPaths": [
+        "miniapp/node_modules/**",
+        "miniapp/.env",
+        "miniapp/test-results/**"
+      ]
+    },
+    "shell": {
+      "allowedCommands": [
+        "npm run build",
+        "npm run dev",
+        "npm run lint",
+        "npm run test:e2e",
+        "npm run test:e2e:list",
+        "npm run check:miniapp:bundle",
+        "node --version",
+        "git status",
+        "git diff",
+        "echo",
+        "rg"
+      ],
+      "autoAllowReadonly": true,
+      "denyByDefault": false
+    }
+  },
+  "resources": [
+    "file://miniapp/src/App.jsx",
+    "file://miniapp/package.json",
+    "file://miniapp/vite.config.js",
+    "file://miniapp/tailwind.config.js",
+    "file://miniapp/README.md",
+    "file://AGENTS.md",
+    "file://.kiro/steering/project-conventions.md",
+    "file://.kiro/steering/miniapp-patterns.md"
+  ],
+  "keyboardShortcut": "ctrl+shift+m",
+  "welcomeMessage": "Mini App agent ready. I work in miniapp/: React, Tailwind, Supabase, Playwright. What are we building or testing?"
+}

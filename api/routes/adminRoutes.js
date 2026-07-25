@@ -60,7 +60,10 @@ const {
   getReconciliationTimelineController,
   getReconciliationMismatchesController,
   holdPayoutController,
-  unholdPayoutController
+  unholdPayoutController,
+  assignRiskFlagController,
+  escalateRiskFlagController,
+  addRiskFlagNoteController
 } = require('../controllers/adminController');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { requireAdminActor } = require('../middleware/requireAdminActor');
@@ -146,6 +149,12 @@ router.post('/payouts/:id/cancel-unclaimed', requireAdminActor, asyncHandler(can
 router.post('/payouts/:id/reject', requireAdminActor, asyncHandler(rejectPayoutController));
 router.post('/payouts/:id/notes', requireAdminActor, asyncHandler(addPayoutNoteController));
 router.get('/risk-flags', requireAdminActor, asyncHandler(listRiskFlagsController));
+router.post('/risk-flags/:id/assign', requireAdminActor, asyncHandler(assignRiskFlagController));
+router.post('/risk-flags/:id/escalate', requireAdminActor, asyncHandler(escalateRiskFlagController));
+router.post('/risk-flags/:id/notes', requireAdminActor, asyncHandler(addRiskFlagNoteController));
+router.post('/risk-flags/:id/assign', requireAdminActor, asyncHandler(assignRiskFlagController));
+router.post('/risk-flags/:id/escalate', requireAdminActor, asyncHandler(escalateRiskFlagController));
+router.post('/risk-flags/:id/notes', requireAdminActor, asyncHandler(addRiskFlagNoteController));
 router.get('/webhooks', requireAdminActor, asyncHandler(listWebhookEventsController));
 router.get('/webhooks/:id', requireAdminActor, asyncHandler(getWebhookEventController));
 router.post('/webhooks/:id/replay', requireAdminActor, asyncHandler(replayWebhookEventController));

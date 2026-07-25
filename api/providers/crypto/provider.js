@@ -1,3 +1,5 @@
+'use strict';
+
 const BaseProvider = require('../base-provider');
 
 class CryptoCommerceProvider extends BaseProvider {
@@ -7,17 +9,23 @@ class CryptoCommerceProvider extends BaseProvider {
 
   createClient() {
     const CryptoCommerceClient = require('./client');
-    return new CryptoCommerceClient({ apiKey: this.config.apiKey, baseUrl: this.config.baseUrl, logger: this.logger });
+    const cfg = this.getConfig();
+    return new CryptoCommerceClient({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, logger: this.logger });
   }
 
   async fetchTransactions(opts = {}) {
     return this.createClient().listCharges(opts);
   }
 
+  async getHealth() {
+    const cfg = this.getConfig();
+    return { provider: this.id, status: cfg.configured ? 'configured' : 'needs-env', configured: cfg.configured };
+  }
+
   async handleWebhook(req, res) {
-    // Providers must verify X-CC-Webhook-Signature header before processing
-    this.logger.info('crypto:webhook', { headers: req.headers });
-    res.status(200).send({ ok: true });
+    // Must verify X-CC-Webhook-Signature header before processing
+    this.logger.info({ provider: this.id }, 'crypto:webhook received');
+    res.status(200).json({ ok: true, provider: this.id });
   }
 }
 

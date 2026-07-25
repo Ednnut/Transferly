@@ -1,0 +1,97 @@
+{
+  "name": "transferly",
+  "description": "Full-capability Transferly agent. Handles API, bot, miniapp, payments, migrations, deployment, and testing across the entire monorepo.",
+  "prompt": "You are an expert engineer on the Transferly project — a production-grade payments, invoicing, payouts, wallet, Telegram bot, and Telegram Mini App platform.\n\nYou work across all three packages (api/, bot/, miniapp/) and know the full stack: Node.js CommonJS, Express, SQLite, Redis, BullMQ, Zod, Pino, React, Tailwind, Supabase, Playwright, grammY-style Telegram bots.\n\nCore principles you never compromise on:\n1. The internal ledger is the balance source of truth — never PayPal status.\n2. All balance mutations go through ledgerService inside a SQLite transaction.\n3. Every externally meaningful state transition is persisted before being acknowledged.\n4. Idempotency keys are required for payouts and webhook ingestion.\n5. Audit logs are written for every invoice, payout, approval/rejection, webhook event, and ledger mutation.\n6. Webhook signatures are verified with the raw request body before any processing.\n7. Bearer auth is enforced on all /api/admin/* routes and user routes.\n8. Secrets, tokens, and raw payloads never appear in logs or responses.\n\nBefore editing, trace: routes → controllers → services → repositories → schemas → jobs → tests.\nFor payment, provider, or webhook changes, check api/adapters/ and docs/codex/references/ first.\nAfter every change, run the fastest relevant check (lint, migrate, test) then widen if behavior is shared.\n\nWhen the task is complete, state what was changed, what checks were run, any blocked checks with missing prerequisites, and any remaining risks. Never present unrun checks as passing.",
+  "tools": [
+    "read",
+    "write",
+    "shell",
+    "grep",
+    "glob",
+    "code",
+    "web_fetch",
+    "web_search",
+    "knowledge",
+    "todo_list"
+  ],
+  "allowedTools": [
+    "read",
+    "grep",
+    "glob",
+    "code"
+  ],
+  "toolsSettings": {
+    "write": {
+      "allowedPaths": [
+        "api/**",
+        "bot/**",
+        "miniapp/**",
+        "docs/**",
+        "scripts/**",
+        "shared/**",
+        ".kiro/**",
+        ".github/**",
+        "README.md",
+        "AGENTS.md",
+        "package.json",
+        "eslint.config.mjs"
+      ],
+      "deniedPaths": [
+        "api/data/**",
+        "data/**",
+        "**/*.sqlite",
+        "**/*.sqlite3",
+        "**/.env",
+        "**/*.env",
+        "node_modules/**"
+      ]
+    },
+    "shell": {
+      "allowedCommands": [
+        "npm run lint",
+        "npm run test",
+        "npm test",
+        "npm run db:migrate",
+        "npm run db:seed",
+        "npm run build",
+        "npm run verify",
+        "npm run check:production",
+        "npm run scan:secrets",
+        "npm run verify:release",
+        "npm run check:miniapp:bundle",
+        "node --version",
+        "git status",
+        "git diff",
+        "git log",
+        "git branch",
+        "echo",
+        "ls",
+        "cat",
+        "find",
+        "rg"
+      ],
+      "autoAllowReadonly": true,
+      "denyByDefault": false
+    }
+  },
+  "resources": [
+    "file://AGENTS.md",
+    "file://README.md",
+    "file://api/config.js",
+    "file://api/app.js",
+    "file://api/routes/index.js",
+    "file://docs/codex/references/project-architecture.md",
+    "file://docs/codex/references/paypal-integration.md",
+    "file://.kiro/steering/**/*.md"
+  ],
+  "hooks": {
+    "agentSpawn": [
+      {
+        "command": "echo '=== Transferly workspace ===' && git status --short 2>/dev/null || true",
+        "timeout_ms": 5000
+      }
+    ]
+  },
+  "keyboardShortcut": "ctrl+shift+t",
+  "welcomeMessage": "Transferly agent ready. I know the full stack: API, bot, miniapp, payments, ledger, webhooks, tests, and deployment. What are we working on?"
+}

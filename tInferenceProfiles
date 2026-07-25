@@ -1,0 +1,26 @@
+----------------------------------------------------------------
+|                     ListInferenceProfiles                    |
++----------------------------------------------------+---------+
+|  [1m[34mus.anthropic.claude-3-haiku-20240307-v1:0[0m         |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-opus-4-1-20250805-v1:0[0m        |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-sonnet-4-6[0m                    |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-opus-4-5-20251101-v1:0[0m        |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-opus-4-5-20251101-v1:0[0m    |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-opus-4-7[0m                      |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-sonnet-4-5-20250929-v1:0[0m  |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-sonnet-4-5-20250929-v1:0[0m      |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-opus-4-6-v1[0m                   |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-haiku-4-5-20251001-v1:0[0m   |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-opus-4-6-v1[0m               |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-sonnet-4-6[0m                |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-sonnet-4-20250514-v1:0[0m        |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-sonnet-4-20250514-v1:0[0m    |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-opus-4-7[0m                  |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-opus-4-8[0m                      |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-opus-4-8[0m                  |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-haiku-4-5-20251001-v1:0[0m       |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-fable-5[0m                       |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-fable-5[0m                   |  [1m[34mACTIVE[0m |
+|  [1m[34mus.anthropic.claude-sonnet-5[0m                      |  [1m[34mACTIVE[0m |
+|  [1m[34mglobal.anthropic.claude-sonnet-5[0m                  |  [1m[34mACTIVE[0m |
++----------------------------------------------------+---------+

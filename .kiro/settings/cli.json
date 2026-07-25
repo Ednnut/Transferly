@@ -1,0 +1,9 @@
+{
+  "chat.defaultAgent": "transferly",
+  "chat.enableThinking": true,
+  "chat.enableCodeIntelligence": true,
+  "chat.enableSubagent": true,
+  "chat.enableTodoList": true,
+  "chat.autoExpandToolOutput": false,
+  "chat.disableInheritingDefaultResources": false
+}

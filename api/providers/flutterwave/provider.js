@@ -1,3 +1,5 @@
+'use strict';
+
 const BaseProvider = require('../base-provider');
 
 class FlutterwaveProvider extends BaseProvider {
@@ -7,17 +9,23 @@ class FlutterwaveProvider extends BaseProvider {
 
   createClient() {
     const FlutterwaveClient = require('./client');
-    return new FlutterwaveClient({ secretKey: this.config.secretKey, baseUrl: this.config.baseUrl, logger: this.logger });
+    const cfg = this.getConfig();
+    return new FlutterwaveClient({ secretKey: cfg.secretKey, baseUrl: cfg.baseUrl, logger: this.logger });
   }
 
   async fetchTransactions(opts = {}) {
     return this.createClient().listTransactions(opts);
   }
 
+  async getHealth() {
+    const cfg = this.getConfig();
+    return { provider: this.id, status: cfg.configured ? 'configured' : 'needs-env', configured: cfg.configured };
+  }
+
   async handleWebhook(req, res) {
-    // Providers must verify verif-hash header before processing
-    this.logger.info('flutterwave:webhook', { headers: req.headers });
-    res.status(200).send({ ok: true });
+    // Must verify verif-hash header before processing
+    this.logger.info({ provider: this.id }, 'flutterwave:webhook received');
+    res.status(200).json({ ok: true, provider: this.id });
   }
 }
 

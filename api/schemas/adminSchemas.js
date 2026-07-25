@@ -308,6 +308,18 @@ const payoutHoldSchema = z.object({
   reason: z.string().trim().min(1).max(500)
 });
 
+const riskFlagAssignSchema = z.object({
+  operatorId: z.string().trim().min(1).max(255)
+});
+
+const riskFlagEscalateSchema = z.object({
+  note: z.string().trim().min(1).max(1000)
+});
+
+const riskFlagNoteSchema = z.object({
+  note: z.string().trim().min(1).max(1000)
+});
+
 module.exports = {
   adminAdjustUserPointsSchema,
   adminReconcileUserPointsSchema,
@@ -351,5 +363,8 @@ module.exports = {
   listDeadLetterJobsQuerySchema,
   deadLetterJobParamsSchema,
   deadLetterRecoverySchema,
-  payoutHoldSchema
+  payoutHoldSchema,
+  riskFlagAssignSchema,
+  riskFlagEscalateSchema,
+  riskFlagNoteSchema
 };

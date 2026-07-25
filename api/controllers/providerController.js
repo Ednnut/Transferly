@@ -278,6 +278,18 @@ async function listProviderPayoutsController(request, response) {
   });
 }
 
+/**
+ * Resolve the correct payout service for a given provider.
+ * PayPal has its own dedicated service; all other providers use the
+ * generic providerPayoutService.
+ *
+ * This replaces the scattered `if (provider !== 'paypal')` branches with a
+ * single dispatch point so adding a new provider requires no controller changes.
+ */
+function resolvePayoutService(provider) {
+  return provider === 'paypal' ? paypalPayoutService : providerPayoutService;
+}
+
 async function previewProviderPayoutController(request, response) {
   const { provider } = parseProviderParams(request);
   providerCapabilityService.assertProviderOperation(provider, 'payouts');
@@ -287,22 +299,14 @@ async function previewProviderPayoutController(request, response) {
     provider
   });
   const userId = resolveUserIdForRequest(request, body.userId);
+  const service = resolvePayoutService(provider);
 
-  if (provider !== 'paypal') {
-    const preview = await providerPayoutService.previewPayout({
-      ...body,
-      userId,
-      includeProviderBalance: request.auth?.role === 'ADMIN',
-      actorType: resolveAuditActorType(request),
-      actorId: resolveAuditActorId(request)
-    });
-    response.json(withProviderContractMeta(preview, request, { provider }));
-    return;
-  }
-
-  const preview = await paypalPayoutService.previewPayout({
+  const preview = await service.previewPayout({
     ...body,
-    userId
+    userId,
+    includeProviderBalance: request.auth?.role === 'ADMIN',
+    actorType: resolveAuditActorType(request),
+    actorId: resolveAuditActorId(request)
   });
   response.json(withProviderContractMeta(preview, request, { provider }));
 }
@@ -318,39 +322,13 @@ async function createProviderPayoutController(request, response) {
     provider
   });
   const userId = resolveUserIdForRequest(request, body.userId);
+  const service = resolvePayoutService(provider);
 
-  if (provider !== 'paypal') {
-    const payout = await providerPayoutService.requestPayout({
-      ...body,
-      userId,
-      actorType: resolveAuditActorType(request),
-      actorId: resolveAuditActorId(request),
-      idempotencyKey: request.idempotencyKey
-    });
-
-    if (payout.nextAction !== 'PROCESS') {
-      response.status(201).json({
-        payout_id: payout.payout_id,
-        status: payout.status,
-        tracking: payout.tracking,
-        risk_decision: payout.risk_decision,
-        metadata: payout.metadata,
-        ...buildMutationMeta(request, provider)
-      });
-      return;
-    }
-
-    const result = await dispatchPayoutProcessing(
-      payout.payout_id,
-      `process-${provider}-payout`
-    );
-    response.status(201).json(withProviderContractMeta(result, request, buildMutationMeta(request, provider)));
-    return;
-  }
-
-  const payout = await paypalPayoutService.requestPayout({
+  const payout = await service.requestPayout({
     ...body,
     userId,
+    actorType: resolveAuditActorType(request),
+    actorId: resolveAuditActorId(request),
     idempotencyKey: request.idempotencyKey
   });
 
@@ -360,15 +338,14 @@ async function createProviderPayoutController(request, response) {
       status: payout.status,
       tracking: payout.tracking,
       risk_decision: payout.risk_decision,
+      metadata: payout.metadata,
       ...buildMutationMeta(request, provider)
     });
     return;
   }
 
-  const result = await dispatchPayoutProcessing(
-    payout.payout_id,
-    'process-payout'
-  );
+  const jobLabel = provider === 'paypal' ? 'process-payout' : `process-${provider}-payout`;
+  const result = await dispatchPayoutProcessing(payout.payout_id, jobLabel);
   response.status(201).json(withProviderContractMeta(result, request, buildMutationMeta(request, provider)));
 }
 

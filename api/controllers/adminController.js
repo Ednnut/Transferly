@@ -41,7 +41,10 @@ const {
   webhookEventParamsSchema,
   payoutHoldSchema,
   reconciliationTimelineQuerySchema,
-  reconciliationMismatchQuerySchema
+  reconciliationMismatchQuerySchema,
+  riskFlagAssignSchema,
+  riskFlagEscalateSchema,
+  riskFlagNoteSchema
 } = require('../schemas/adminSchemas');
 const {
   presentAdminPayout,
@@ -738,6 +741,69 @@ async function unholdPayoutController(request, response) {
   response.json({ payout: updated });
 }
 
+async function assignRiskFlagController(request, response) {
+  const flag = await riskFlagRepository.findById(request.params.id);
+  if (!flag) {
+    response.status(404).json({ code: 'RISK_FLAG_NOT_FOUND', message: 'Risk flag not found.' });
+    return;
+  }
+  const { operatorId } = riskFlagAssignSchema.parse(request.body || {});
+  const updated = await riskFlagRepository.update(flag.id, {
+    operatorId,
+    assignedAt: new Date().toISOString()
+  });
+  await auditLogService.log({
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId,
+    action: 'risk_flag.assigned',
+    entityType: 'risk_flag',
+    entityId: flag.id,
+    metadata: { operatorId }
+  });
+  response.json({ flag: updated });
+}
+
+async function escalateRiskFlagController(request, response) {
+  const flag = await riskFlagRepository.findById(request.params.id);
+  if (!flag) {
+    response.status(404).json({ code: 'RISK_FLAG_NOT_FOUND', message: 'Risk flag not found.' });
+    return;
+  }
+  const { note } = riskFlagEscalateSchema.parse(request.body || {});
+  const updated = await riskFlagRepository.update(flag.id, {
+    status: 'ESCALATED',
+    escalatedAt: new Date().toISOString(),
+    escalationNote: note
+  });
+  await auditLogService.log({
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId,
+    action: 'risk_flag.escalated',
+    entityType: 'risk_flag',
+    entityId: flag.id,
+    metadata: { note }
+  });
+  response.json({ flag: updated });
+}
+
+async function addRiskFlagNoteController(request, response) {
+  const flag = await riskFlagRepository.findById(request.params.id);
+  if (!flag) {
+    response.status(404).json({ code: 'RISK_FLAG_NOT_FOUND', message: 'Risk flag not found.' });
+    return;
+  }
+  const { note } = riskFlagNoteSchema.parse(request.body || {});
+  await auditLogService.log({
+    actorType: AUDIT_ACTOR_TYPE.ADMIN,
+    actorId: request.adminActorId,
+    action: 'risk_flag.note_added',
+    entityType: 'risk_flag',
+    entityId: flag.id,
+    metadata: { note }
+  });
+  response.status(201).json({ note });
+}
+
 module.exports = {
   acknowledgePaymentOpsIssueController,
   adjustAdminUserPointsController,
@@ -798,5 +864,8 @@ module.exports = {
   getReconciliationTimelineController,
   getReconciliationMismatchesController,
   holdPayoutController,
-  unholdPayoutController
+  unholdPayoutController,
+  assignRiskFlagController,
+  escalateRiskFlagController,
+  addRiskFlagNoteController
 };

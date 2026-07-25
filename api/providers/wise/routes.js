@@ -1,11 +1,25 @@
-const express = require('express');
-const WiseService = require('./service');
+'use strict';
 
+const express = require('express');
 const router = express.Router();
+const WiseService = require('./service');
+const WiseProvider = require('./provider');
+
 const service = new WiseService({
   config: {
     apiToken: process.env.WISE_API_TOKEN,
     profileId: process.env.WISE_PROFILE_ID
+  }
+});
+
+router.get('/health', async (_req, res) => {
+  try {
+    const provider = new WiseProvider();
+    const health = await provider.getHealth();
+    const statusCode = health.configured ? 200 : 503;
+    res.status(statusCode).json({ ok: health.configured, data: health });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 

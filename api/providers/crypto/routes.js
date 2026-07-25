@@ -1,9 +1,23 @@
-const express = require('express');
-const CryptoCommerceService = require('./service');
+'use strict';
 
+const express = require('express');
 const router = express.Router();
+const CryptoCommerceService = require('./service');
+const CryptoCommerceProvider = require('./provider');
+
 const service = new CryptoCommerceService({
   config: { apiKey: process.env.CRYPTO_COMMERCE_API_KEY }
+});
+
+router.get('/health', async (_req, res) => {
+  try {
+    const provider = new CryptoCommerceProvider();
+    const health = await provider.getHealth();
+    const statusCode = health.configured ? 200 : 503;
+    res.status(statusCode).json({ ok: health.configured, data: health });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 router.get('/charges', async (req, res) => {

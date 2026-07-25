@@ -1,3 +1,5 @@
+'use strict';
+
 const BaseProvider = require('../base-provider');
 
 class WiseProvider extends BaseProvider {
@@ -7,10 +9,11 @@ class WiseProvider extends BaseProvider {
 
   createClient() {
     const WiseClient = require('./client');
+    const cfg = this.getConfig();
     return new WiseClient({
-      apiToken: this.config.apiToken,
-      profileId: this.config.profileId,
-      baseUrl: this.config.baseUrl,
+      apiToken: cfg.apiToken,
+      profileId: cfg.profileId,
+      baseUrl: cfg.baseUrl,
       logger: this.logger
     });
   }
@@ -20,10 +23,15 @@ class WiseProvider extends BaseProvider {
     return client.listTransfers(opts);
   }
 
+  async getHealth() {
+    const cfg = this.getConfig();
+    return { provider: this.id, status: cfg.configured ? 'configured' : 'needs-env', configured: cfg.configured };
+  }
+
   async handleWebhook(req, res) {
-    // Providers must verify X-Signature-SHA256 header before processing
-    this.logger.info('wise:webhook', { headers: req.headers });
-    res.status(200).send({ ok: true });
+    // Must verify X-Signature-SHA256 header before processing
+    this.logger.info({ provider: this.id }, 'wise:webhook received');
+    res.status(200).json({ ok: true, provider: this.id });
   }
 }
 

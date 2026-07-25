@@ -1,3 +1,5 @@
+'use strict';
+
 const BaseProvider = require('../base-provider');
 
 class PaystackProvider extends BaseProvider {
@@ -7,17 +9,23 @@ class PaystackProvider extends BaseProvider {
 
   createClient() {
     const PaystackClient = require('./client');
-    return new PaystackClient({ secretKey: this.config.secretKey, baseUrl: this.config.baseUrl, logger: this.logger });
+    const cfg = this.getConfig();
+    return new PaystackClient({ secretKey: cfg.secretKey, baseUrl: cfg.baseUrl, logger: this.logger });
   }
 
   async fetchTransactions(opts = {}) {
     return this.createClient().listTransactions(opts);
   }
 
+  async getHealth() {
+    const cfg = this.getConfig();
+    return { provider: this.id, status: cfg.configured ? 'configured' : 'needs-env', configured: cfg.configured };
+  }
+
   async handleWebhook(req, res) {
-    // Providers must verify X-Paystack-Signature header before processing
-    this.logger.info('paystack:webhook', { headers: req.headers });
-    res.status(200).send({ ok: true });
+    // Must verify X-Paystack-Signature header before processing
+    this.logger.info({ provider: this.id }, 'paystack:webhook received');
+    res.status(200).json({ ok: true, provider: this.id });
   }
 }
 

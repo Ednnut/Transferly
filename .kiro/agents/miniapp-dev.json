@@ -16,7 +16,8 @@
     "read",
     "grep",
     "glob",
-    "code"
+    "code",
+    "todo_list"
   ],
   "toolsSettings": {
     "write": {
@@ -51,10 +52,12 @@
         "git status",
         "git diff",
         "echo",
-        "rg"
+        "rg",
+        "grep"
       ],
       "autoAllowReadonly": true,
-      "denyByDefault": false
+      "denyByDefault": false,
+      "timeoutMs": 120000
     }
   },
   "resources": [
@@ -68,5 +71,5 @@
     "file://.kiro/steering/miniapp-patterns.md"
   ],
   "keyboardShortcut": "ctrl+shift+m",
-  "welcomeMessage": "Mini App agent ready. I work in miniapp/: React, Tailwind, Supabase, Playwright. What are we building or testing?"
+  "welcomeMessage": "Mini App agent ready. Working in miniapp/: React, Tailwind, Supabase, Playwright. What are we building or testing?"
 }

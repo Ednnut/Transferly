@@ -24,6 +24,13 @@ process.env.STRIPE_PAYOUTS_ENABLED = 'true';
 process.env.CRYPTO_COMMERCE_API_KEY = 'crypto-commerce-key';
 process.env.CRYPTO_COMMERCE_WEBHOOK_SECRET = 'crypto-commerce-webhook-secret';
 process.env.CRYPTO_COMMERCE_API_BASE_URL = 'https://api.commerce.coinbase.test';
+process.env.PAYSTACK_SECRET_KEY = 'sk_test_paystack_transferly';
+process.env.PAYSTACK_WEBHOOK_SECRET = 'paystack-webhook-secret-transferly';
+process.env.FLUTTERWAVE_SECRET_KEY = 'FLWSECK_TEST-transferly';
+process.env.FLUTTERWAVE_WEBHOOK_SECRET = 'flw-webhook-secret-transferly';
+process.env.WISE_API_TOKEN = 'wise-api-token-transferly';
+process.env.WISE_PROFILE_ID = '12345678';
+process.env.WISE_WEBHOOK_PUBLIC_KEY = '';
 process.env.TELEGRAM_BOT_TOKEN = '1234567890:test-mini-app-token';
 process.env.TELEGRAM_MINI_APP_URL = 'https://mini.transferly.test';
 process.env.TELEGRAM_MINI_APP_AUTH_EXPIRES_IN_SECONDS = '3600';
@@ -229,6 +236,14 @@ function createCoinbaseSignature(payload, headers, secret = process.env.CRYPTO_C
     .update(`${timestamp}.${headerNames}.${headerValues}.${payload}`, 'utf8')
     .digest('hex');
   return `t=${timestamp},h=${headerNames},v1=${signature}`;
+}
+
+function createPaystackSignature(payload, secret = process.env.PAYSTACK_SECRET_KEY) {
+  return crypto.createHmac('sha512', secret).update(payload, 'utf8').digest('hex');
+}
+
+function createFlutterwaveHash(secret = process.env.FLUTTERWAVE_WEBHOOK_SECRET) {
+  return secret;
 }
 
 function installFetchStub() {
@@ -6180,5 +6195,162 @@ describe('API integration flows', () => {
 
     assert.equal(response.status, 401);
     assert.equal(response.json().code, 'ADMIN_AUTH_REQUIRED');
+  });
+
+  test('Paystack charge.success webhook verifies signature, credits pending balance, and deduplicates', async () => {
+    const paystackRef = `paystack-test-ref-${Date.now()}`;
+    await invoiceRepository.create({
+      userId: 'demo-user',
+      paypalInvoiceId: paystackRef,
+      invoiceNumber: `PS-${Date.now()}`,
+      status: 'SENT',
+      amountCents: 5000,
+      currencyCode: 'USD',
+      recipientEmail: 'buyer@example.com',
+      description: 'Paystack webhook invoice',
+      invoiceUrl: `https://paystack.test/${paystackRef}`,
+      paypalDetails: {},
+      metadata: { provider: 'paystack' }
+    });
+
+    const webhookPayload = JSON.stringify({
+      event: 'charge.success',
+      data: {
+        id: 900001,
+        reference: paystackRef,
+        status: 'success',
+        amount: 5000,
+        currency: 'USD',
+        channel: 'card'
+      }
+    });
+
+    const sig = createPaystackSignature(webhookPayload);
+
+    const webhookResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/paystack',
+      headers: jsonHeaders(webhookPayload, { 'x-paystack-signature': sig }),
+      body: webhookPayload
+    });
+
+    assert.equal(webhookResponse.status, 202, `expected 202, got ${webhookResponse.status}: ${JSON.stringify(webhookResponse.json())}`);
+    assert.equal(webhookResponse.json().duplicate, false);
+
+    const updatedInvoice = await invoiceRepository.findByPaypalInvoiceId(paystackRef);
+    assert.equal(updatedInvoice.status, 'PAID');
+    assert.equal(updatedInvoice.metadata.provider, 'paystack');
+
+    const user = await userRepository.findById('demo-user');
+    assert.ok(user.wallet.pendingBalanceCents >= 5000);
+
+    // Duplicate: same event_id — should return 200 and NOT double-credit
+    const balanceBefore = user.wallet.pendingBalanceCents;
+    const dupResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/paystack',
+      headers: jsonHeaders(webhookPayload, { 'x-paystack-signature': sig }),
+      body: webhookPayload
+    });
+    assert.equal(dupResponse.status, 200);
+    assert.equal(dupResponse.json().duplicate, true);
+
+    const userAfterDup = await userRepository.findById('demo-user');
+    assert.equal(userAfterDup.wallet.pendingBalanceCents, balanceBefore);
+  });
+
+  test('Paystack webhook rejects invalid signature with 400', async () => {
+    const webhookPayload = JSON.stringify({ event: 'charge.success', data: { id: 1, reference: 'x', status: 'success' } });
+    const response = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/paystack',
+      headers: jsonHeaders(webhookPayload, { 'x-paystack-signature': 'deadbeef' }),
+      body: webhookPayload
+    });
+    assert.equal(response.status, 400);
+  });
+
+  test('Flutterwave charge.completed webhook verifies hash, credits pending balance, and deduplicates', async () => {
+    const flwTxRef = `flw-test-ref-${Date.now()}`;
+    await invoiceRepository.create({
+      userId: 'demo-user',
+      paypalInvoiceId: flwTxRef,
+      invoiceNumber: `FLW-${Date.now()}`,
+      status: 'SENT',
+      amountCents: 7500,
+      currencyCode: 'USD',
+      recipientEmail: 'buyer@example.com',
+      description: 'Flutterwave webhook invoice',
+      invoiceUrl: `https://flutterwave.test/${flwTxRef}`,
+      paypalDetails: {},
+      metadata: { provider: 'flutterwave' }
+    });
+
+    const webhookPayload = JSON.stringify({
+      event: 'charge.completed',
+      data: {
+        id: 800001,
+        tx_ref: flwTxRef,
+        status: 'successful',
+        amount: 75,
+        currency: 'USD',
+        payment_type: 'card'
+      }
+    });
+
+    const hash = createFlutterwaveHash();
+    const webhookResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/flutterwave',
+      headers: jsonHeaders(webhookPayload, { 'verif-hash': hash }),
+      body: webhookPayload
+    });
+
+    assert.equal(webhookResponse.status, 202, `expected 202, got ${webhookResponse.status}: ${JSON.stringify(webhookResponse.json())}`);
+    assert.equal(webhookResponse.json().duplicate, false);
+
+    const updatedInvoice = await invoiceRepository.findByPaypalInvoiceId(flwTxRef);
+    assert.equal(updatedInvoice.status, 'PAID');
+    assert.equal(updatedInvoice.metadata.provider, 'flutterwave');
+
+    const user = await userRepository.findById('demo-user');
+    assert.ok(user.wallet.pendingBalanceCents >= 7500);
+
+    // Duplicate
+    const balanceBefore = user.wallet.pendingBalanceCents;
+    const dupResponse = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/flutterwave',
+      headers: jsonHeaders(webhookPayload, { 'verif-hash': hash }),
+      body: webhookPayload
+    });
+    assert.equal(dupResponse.status, 200);
+    assert.equal(dupResponse.json().duplicate, true);
+
+    const userAfterDup = await userRepository.findById('demo-user');
+    assert.equal(userAfterDup.wallet.pendingBalanceCents, balanceBefore);
+  });
+
+  test('Flutterwave webhook rejects wrong verif-hash with 400', async () => {
+    const webhookPayload = JSON.stringify({ event: 'charge.completed', data: { id: 1, tx_ref: 'x', status: 'successful' } });
+    const response = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/flutterwave',
+      headers: jsonHeaders(webhookPayload, { 'verif-hash': 'wrong-hash' }),
+      body: webhookPayload
+    });
+    assert.equal(response.status, 400);
+  });
+
+  test('Wise ping webhook returns 200 without processing', async () => {
+    const pingPayload = JSON.stringify({ event_type: 'ping' });
+    const response = await injectRequest(app, {
+      method: 'POST',
+      url: '/webhooks/wise',
+      headers: jsonHeaders(pingPayload),
+      body: pingPayload
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.json().ok, true);
   });
 });

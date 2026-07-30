@@ -7,7 +7,10 @@ const { providerInvoiceWebhookHandlers } = require('../webhooks/providerInvoiceW
 const { AppError } = require('../utils/errors');
 const {
   verifyCoinbaseWebhookSignature,
-  verifyStripeSignature
+  verifyStripeSignature,
+  verifyPaystackSignature,
+  verifyFlutterwaveSignature,
+  verifyWiseSignature
 } = require('../utils/providerWebhookSignatures');
 const { AUDIT_ACTOR_TYPE, WEBHOOK_PROCESSING_STATUS } = require('../utils/constants');
 
@@ -228,6 +231,62 @@ async function ingestCryptoEvent(headers, event, rawBody, requestHeaders = {}) {
   });
 }
 
+async function ingestPaystackEvent(headers, event, rawBody) {
+  const secret = config.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET_KEY || '';
+  verifyPaystackSignature(rawBody, headers.signature, secret);
+
+  return ingestVerifiedProviderEvent({
+    provider: 'paystack',
+    eventId: String(event?.data?.id || event?.data?.reference || ''),
+    eventType: String(event?.event || 'unknown'),
+    resourceType: event?.data?.channel || null,
+    transmissionId: headers.signature || null,
+    payload: event,
+    verificationPayload: { signature_header_present: Boolean(headers.signature) }
+  });
+}
+
+async function ingestFlutterwaveEvent(headers, event) {
+  const secret = config.FLUTTERWAVE_WEBHOOK_SECRET || process.env.FLUTTERWAVE_WEBHOOK_SECRET || '';
+  verifyFlutterwaveSignature(headers.verifHash, secret);
+
+  return ingestVerifiedProviderEvent({
+    provider: 'flutterwave',
+    eventId: String(event?.data?.id || event?.data?.tx_ref || ''),
+    eventType: String(event?.event || 'unknown'),
+    resourceType: event?.data?.payment_type || null,
+    transmissionId: null,
+    payload: event,
+    verificationPayload: { verif_hash_present: Boolean(headers.verifHash) }
+  });
+}
+
+async function ingestWiseEvent(headers, event, rawBody) {
+  const publicKey = config.WISE_WEBHOOK_PUBLIC_KEY || process.env.WISE_WEBHOOK_PUBLIC_KEY || '';
+  if (publicKey) {
+    verifyWiseSignature(rawBody, headers.signature, publicKey);
+  }
+  // When WISE_WEBHOOK_PUBLIC_KEY is not set, skip verification (dev/test mode only)
+
+  const eventType = String(event?.event_type || 'unknown');
+  const resourceId = String(
+    event?.data?.resource?.id ||
+    event?.data?.id ||
+    event?.data?.transfer_id ||
+    ''
+  );
+
+  return ingestVerifiedProviderEvent({
+    provider: 'wise',
+    eventId: resourceId || `wise:${Date.now()}`,
+    eventType,
+    resourceType: event?.data?.resource_type || null,
+    transmissionId: headers.signature || null,
+    payload: event,
+    verificationPayload: { signature_header_present: Boolean(headers.signature) }
+  });
+}
+
 async function processWebhookEvent(webhookEventId) {
   const webhookEvent = await webhookEventRepository.findById(webhookEventId);
   if (!webhookEvent) {
@@ -265,6 +324,15 @@ async function processWebhookEvent(webhookEventId) {
       case 'checkout.payment.failed':
       case 'checkout.payment.expired':
         await providerInvoiceWebhookHandlers.handleCryptoChargeEvent(event);
+        break;
+      case 'charge.success':
+        await providerInvoiceWebhookHandlers.handlePaystackChargeEvent(event);
+        break;
+      case 'charge.completed':
+        await providerInvoiceWebhookHandlers.handleFlutterwaveChargeEvent(event);
+        break;
+      case 'transfers#state-change':
+        await providerInvoiceWebhookHandlers.handleWiseTransferEvent(event);
         break;
       case 'INVOICING.INVOICE.CREATED':
         await paypalWebhookHandlers.handleInvoiceCreated(event);
@@ -333,6 +401,9 @@ module.exports = {
     ingestPayPalEvent,
     ingestStripeEvent,
     ingestCryptoEvent,
+    ingestPaystackEvent,
+    ingestFlutterwaveEvent,
+    ingestWiseEvent,
     processWebhookEvent
   }
 };

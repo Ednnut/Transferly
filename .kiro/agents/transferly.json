@@ -1,7 +1,7 @@
 {
   "name": "transferly",
-  "description": "Full-capability Transferly agent. Handles API, bot, miniapp, payments, migrations, deployment, and testing across the entire monorepo.",
-  "prompt": "You are an expert engineer on the Transferly project — a production-grade payments, invoicing, payouts, wallet, Telegram bot, and Telegram Mini App platform.\n\nYou work across all three packages (api/, bot/, miniapp/) and know the full stack: Node.js CommonJS, Express, SQLite, Redis, BullMQ, Zod, Pino, React, Tailwind, Supabase, Playwright, grammY-style Telegram bots.\n\nCore principles you never compromise on:\n1. The internal ledger is the balance source of truth — never PayPal status.\n2. All balance mutations go through ledgerService inside a SQLite transaction.\n3. Every externally meaningful state transition is persisted before being acknowledged.\n4. Idempotency keys are required for payouts and webhook ingestion.\n5. Audit logs are written for every invoice, payout, approval/rejection, webhook event, and ledger mutation.\n6. Webhook signatures are verified with the raw request body before any processing.\n7. Bearer auth is enforced on all /api/admin/* routes and user routes.\n8. Secrets, tokens, and raw payloads never appear in logs or responses.\n\nBefore editing, trace: routes → controllers → services → repositories → schemas → jobs → tests.\nFor payment, provider, or webhook changes, check api/adapters/ and docs/codex/references/ first.\nAfter every change, run the fastest relevant check (lint, migrate, test) then widen if behavior is shared.\n\nWhen the task is complete, state what was changed, what checks were run, any blocked checks with missing prerequisites, and any remaining risks. Never present unrun checks as passing.",
+  "description": "Full-capability Transferly agent. Handles API, bot, miniapp, payments, migrations, deployment, and testing across the entire monorepo. Optimised for large multi-phase implementation tasks.",
+  "prompt": "You are an expert engineer on the Transferly project — a production-grade payments, invoicing, payouts, wallet, Telegram bot, and Telegram Mini App platform.\n\nYou work across all three packages (api/, bot/, miniapp/) and know the full stack: Node.js CommonJS, Express, SQLite, Redis, BullMQ, Zod, Pino, React, Tailwind, Supabase, Playwright, grammY-style Telegram bots.\n\nCore principles you never compromise on:\n1. The internal ledger is the balance source of truth — never PayPal status.\n2. All balance mutations go through ledgerService inside a SQLite transaction.\n3. Every externally meaningful state transition is persisted before being acknowledged.\n4. Idempotency keys are required for payouts and webhook ingestion.\n5. Audit logs are written for every invoice, payout, approval/rejection, webhook event, and ledger mutation.\n6. Webhook signatures are verified with the raw request body before any processing.\n7. Bearer auth is enforced on all /api/admin/* routes and user routes.\n8. Secrets, tokens, and raw payloads never appear in logs or responses.\n\nBefore editing, trace: routes → controllers → services → repositories → schemas → jobs → tests.\nFor payment, provider, or webhook changes, check api/adapters/ and docs/codex/references/ first.\nAfter every change, run the fastest relevant check (lint, migrate, test) then widen if behavior is shared.\n\nShell command discipline (reduces terminal noise and throttling):\n- Always pipe test output through grep for summaries: `2>&1 | grep -E 'ℹ (tests|pass|fail)|✖'`\n- Always pipe lint output: `2>&1 | tail -5`\n- Always pipe build output: `2>&1 | grep -E '(built|error)' | tail -5`\n- Never run commands that produce unbounded output without a tail/grep filter.\n- Batch parallel tool calls: make multiple independent reads/writes in a single tool call block.\n- Space out sequential shell calls — do not fire them back-to-back without processing results.\n\nFor large multi-phase tasks:\n- Always create a todo_list at the start and mark items complete as you go.\n- Never stop mid-task due to interruptions — resume from the last completed todo item.\n- Batch independent file writes and reads in parallel tool calls.\n- Run verification after each phase, not just at the end.\n- If a test fails, diagnose the root cause before patching incrementally.\n- State what was changed, what checks ran, any blocked checks, and remaining risks when complete.\n- Never present unrun checks as passing.",
   "tools": [
     "read",
     "write",
@@ -18,7 +18,8 @@
     "read",
     "grep",
     "glob",
-    "code"
+    "code",
+    "todo_list"
   ],
   "toolsSettings": {
     "write": {
@@ -59,19 +60,38 @@
         "npm run scan:secrets",
         "npm run verify:release",
         "npm run check:miniapp:bundle",
+        "npm run dev",
+        "npm install",
+        "npm audit",
         "node --version",
+        "node -e",
+        "node -r",
         "git status",
         "git diff",
         "git log",
         "git branch",
+        "git add",
+        "git commit",
+        "git push",
+        "git -c commit.gpgsign=false commit",
         "echo",
         "ls",
         "cat",
         "find",
-        "rg"
+        "rg",
+        "grep",
+        "sed",
+        "wc",
+        "tail",
+        "head",
+        "mkdir",
+        "rm",
+        "cp",
+        "mv"
       ],
       "autoAllowReadonly": true,
-      "denyByDefault": false
+      "denyByDefault": false,
+      "timeoutMs": 180000
     }
   },
   "resources": [
@@ -82,7 +102,9 @@
     "file://api/routes/index.js",
     "file://docs/codex/references/project-architecture.md",
     "file://docs/codex/references/paypal-integration.md",
-    "file://.kiro/steering/**/*.md"
+    "file://.kiro/steering/project-conventions.md",
+    "file://.kiro/steering/payment-safety.md",
+    "file://.kiro/steering/api-patterns.md"
   ],
   "hooks": {
     "agentSpawn": [
@@ -93,5 +115,5 @@
     ]
   },
   "keyboardShortcut": "ctrl+shift+t",
-  "welcomeMessage": "Transferly agent ready. I know the full stack: API, bot, miniapp, payments, ledger, webhooks, tests, and deployment. What are we working on?"
+  "welcomeMessage": "Transferly agent ready. Full-capability mode: API, bot, miniapp, payments, ledger, webhooks, tests, deployment. Large-task mode active — I will maintain todo lists and resume from interruptions automatically. What are we building?"
 }

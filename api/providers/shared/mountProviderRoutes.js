@@ -20,6 +20,14 @@ const path = require('node:path');
 const { requireAuthenticatedUser } = require('../../middleware/authenticateRequest');
 const { providerModuleRegistry } = require('../moduleRegistry');
 
+/**
+ * Provider keys whose webhooks are already fully handled by webhookRoutes.js
+ * (paypalWebhookHandlers, stripeWebhookHandlers, cryptoWebhookHandlers).
+ * Per-provider webhooks.js files are NOT mounted for these keys to avoid
+ * double-handling and route shadowing.
+ */
+const WEBHOOK_HANDLED_BY_CORE = new Set(['paypal', 'stripe', 'crypto']);
+
 const PROVIDERS_DIR = path.resolve(__dirname, '..');
 
 /**
@@ -49,7 +57,7 @@ function buildPerProviderRouters() {
     }
 
     const webhooksPath = path.join(PROVIDERS_DIR, key, 'webhooks.js');
-    if (fs.existsSync(webhooksPath)) {
+    if (fs.existsSync(webhooksPath) && !WEBHOOK_HANDLED_BY_CORE.has(key)) {
       try {
         const router = require(webhooksPath);
         webhookRouters.push({

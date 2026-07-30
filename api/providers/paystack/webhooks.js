@@ -3,106 +3,54 @@
 /**
  * Paystack webhook router — mounted at /webhooks/paystack
  *
- * Security contract:
- *  - Paystack signs webhooks with HMAC-SHA512 using PAYSTACK_SECRET_KEY.
- *    The X-Paystack-Signature header contains the hex digest.
- *  - Deduplication is by event id (data.id field).
- *  - Return HTTP 200 immediately; heavy work is queued.
- *
- * Docs: https://paystack.com/docs/payments/webhooks/
+ * Security:  HMAC-SHA512 via verifyPaystackSignature (providerWebhookSignatures.js)
+ * Dedup:     DB-backed via webhookEventRepository unique constraint on event_id
+ * Response:  202 first receipt, 200 duplicate — matches the Stripe/Crypto pattern
  */
 
-const crypto = require('node:crypto');
 const express = require('express');
 const { logger } = require('../../utils/logger');
+const { webhookService } = require('../../services/webhookService');
+const { enqueueWebhookProcessing } = require('../../jobs/dispatchers');
 
 const router = express.Router();
 
-// ---------------------------------------------------------------------------
-// Signature verification (HMAC-SHA512)
-// ---------------------------------------------------------------------------
-
-function verifyPaystackSignature(rawBody, sigHeader, secretKey) {
-  if (!secretKey || !sigHeader) return false;
-  try {
-    const expected = crypto
-      .createHmac('sha512', secretKey)
-      .update(rawBody)
-      .digest('hex');
-    return crypto.timingSafeEqual(
-      Buffer.from(sigHeader.toLowerCase(), 'hex'),
-      Buffer.from(expected.toLowerCase(), 'hex')
-    );
-  } catch {
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Deduplication
-// ---------------------------------------------------------------------------
-
-const seen = new Set();
-const SEEN_MAX = 5000;
-
-function isDuplicate(eventId) {
-  if (!eventId) return false;
-  if (seen.has(String(eventId))) return true;
-  if (seen.size >= SEEN_MAX) seen.delete(seen.values().next().value);
-  seen.add(String(eventId));
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Route
-// ---------------------------------------------------------------------------
-
-router.post('/', (req, res) => {
-  const rawBody = req.rawBody || req.body;
+router.post('/', async (req, res) => {
+  // rawBody for signature verification must be the exact original bytes
+  const rawBody = req.rawBody
+    || (typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
   const sigHeader = req.headers['x-paystack-signature'] || '';
-  const secretKey = process.env.PAYSTACK_SECRET_KEY || '';
 
-  if (secretKey) {
-    const valid = verifyPaystackSignature(rawBody, sigHeader, secretKey);
-    if (!valid) {
-      logger.warn({ provider: 'paystack' }, 'paystack:webhook signature verification failed');
-      return res.status(400).json({ error: 'Invalid signature' });
-    }
-  } else {
-    logger.warn({ provider: 'paystack' }, 'paystack:webhook PAYSTACK_SECRET_KEY not set — skipping verification (dev mode)');
-  }
+  // Parse event — use already-parsed object when available
+  const event = req.body && typeof req.body === 'object' ? req.body
+    : (() => { try { return JSON.parse(rawBody); } catch { return {}; } })();
 
-  let event;
+  let result;
   try {
-    event = typeof rawBody === 'string' || Buffer.isBuffer(rawBody)
-      ? JSON.parse(rawBody.toString('utf8'))
-      : rawBody;
-  } catch {
-    return res.status(400).json({ error: 'Invalid JSON body' });
+    result = await webhookService.ingestPaystackEvent(
+      { signature: sigHeader },
+      event,
+      rawBody
+    );
+  } catch (err) {
+    logger.warn({ provider: 'paystack', code: err.code, message: err.message }, 'paystack:webhook ingest failed');
+    return res.status(err.statusCode || 400).json({ error: err.message });
   }
 
-  const eventId = event?.data?.id;
-  const eventType = event?.event;
-
-  if (isDuplicate(eventId)) {
-    logger.info({ provider: 'paystack', eventId, eventType }, 'paystack:webhook duplicate — skipping');
-    return res.status(200).json({ ok: true, duplicate: true });
+  if (!result.duplicate) {
+    await enqueueWebhookProcessing(result.webhookEvent.id, result.webhookEvent.eventId);
   }
 
-  logger.info({ provider: 'paystack', eventId, eventType }, 'paystack:webhook received');
+  logger.info(
+    { provider: 'paystack', eventId: result.webhookEvent.eventId, duplicate: result.duplicate },
+    'paystack:webhook received'
+  );
 
-  setImmediate(() => {
-    try {
-      const { processWebhookEvent } = require('./jobs');
-      processWebhookEvent({ data: { event } }).catch((err) => {
-        logger.error({ err, provider: 'paystack', eventId, eventType }, 'paystack:webhook job failed');
-      });
-    } catch (err) {
-      logger.error({ err, provider: 'paystack', eventId }, 'paystack:webhook job dispatch error');
-    }
+  return res.status(result.duplicate ? 200 : 202).json({
+    received: true,
+    duplicate: result.duplicate,
+    event_id: result.webhookEvent.eventId
   });
-
-  return res.status(200).json({ ok: true });
 });
 
 module.exports = router;

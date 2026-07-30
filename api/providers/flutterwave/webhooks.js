@@ -3,102 +3,51 @@
 /**
  * Flutterwave webhook router — mounted at /webhooks/flutterwave
  *
- * Security contract:
- *  - Flutterwave sends the secret hash in the verif-hash header.
- *    Compare it directly (constant-time) to FLUTTERWAVE_WEBHOOK_SECRET.
- *  - Deduplication is by event id (data.id).
- *  - Return HTTP 200 immediately; heavy work is queued.
- *
- * Docs: https://developer.flutterwave.com/docs/integration-guides/webhooks/
+ * Security:  verif-hash constant-time compare via verifyFlutterwaveSignature
+ * Dedup:     DB-backed via webhookEventRepository unique constraint on event_id
+ * Response:  202 first receipt, 200 duplicate
  */
 
-const crypto = require('node:crypto');
 const express = require('express');
 const { logger } = require('../../utils/logger');
+const { webhookService } = require('../../services/webhookService');
+const { enqueueWebhookProcessing } = require('../../jobs/dispatchers');
 
 const router = express.Router();
 
-// ---------------------------------------------------------------------------
-// Signature verification (secret hash comparison)
-// ---------------------------------------------------------------------------
+router.post('/', async (req, res) => {
+  const rawBody = req.rawBody
+    || (typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+  const verifHash = req.headers['verif-hash'] || '';
 
-function verifyFlutterwaveSignature(secretHash, receivedHash) {
-  if (!secretHash || !receivedHash) return false;
+  const event = req.body && typeof req.body === 'object' ? req.body
+    : (() => { try { return JSON.parse(rawBody); } catch { return {}; } })();
+
+  let result;
   try {
-    const a = Buffer.from(secretHash, 'utf8');
-    const b = Buffer.from(receivedHash, 'utf8');
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Deduplication
-// ---------------------------------------------------------------------------
-
-const seen = new Set();
-const SEEN_MAX = 5000;
-
-function isDuplicate(eventId) {
-  if (!eventId) return false;
-  if (seen.has(String(eventId))) return true;
-  if (seen.size >= SEEN_MAX) seen.delete(seen.values().next().value);
-  seen.add(String(eventId));
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Route
-// ---------------------------------------------------------------------------
-
-router.post('/', (req, res) => {
-  const rawBody = req.rawBody || req.body;
-  const receivedHash = req.headers['verif-hash'] || '';
-  const secretHash = process.env.FLUTTERWAVE_WEBHOOK_SECRET || '';
-
-  if (secretHash) {
-    const valid = verifyFlutterwaveSignature(secretHash, receivedHash);
-    if (!valid) {
-      logger.warn({ provider: 'flutterwave' }, 'flutterwave:webhook signature verification failed');
-      return res.status(400).json({ error: 'Invalid signature' });
-    }
-  } else {
-    logger.warn({ provider: 'flutterwave' }, 'flutterwave:webhook FLUTTERWAVE_WEBHOOK_SECRET not set — skipping verification (dev mode)');
+    result = await webhookService.ingestFlutterwaveEvent(
+      { verifHash },
+      event
+    );
+  } catch (err) {
+    logger.warn({ provider: 'flutterwave', code: err.code, message: err.message }, 'flutterwave:webhook ingest failed');
+    return res.status(err.statusCode || 400).json({ error: err.message });
   }
 
-  let event;
-  try {
-    event = typeof rawBody === 'string' || Buffer.isBuffer(rawBody)
-      ? JSON.parse(rawBody.toString('utf8'))
-      : rawBody;
-  } catch {
-    return res.status(400).json({ error: 'Invalid JSON body' });
+  if (!result.duplicate) {
+    await enqueueWebhookProcessing(result.webhookEvent.id, result.webhookEvent.eventId);
   }
 
-  const eventId = event?.data?.id;
-  const eventType = event?.event;
+  logger.info(
+    { provider: 'flutterwave', eventId: result.webhookEvent.eventId, duplicate: result.duplicate },
+    'flutterwave:webhook received'
+  );
 
-  if (isDuplicate(eventId)) {
-    logger.info({ provider: 'flutterwave', eventId, eventType }, 'flutterwave:webhook duplicate — skipping');
-    return res.status(200).json({ ok: true, duplicate: true });
-  }
-
-  logger.info({ provider: 'flutterwave', eventId, eventType }, 'flutterwave:webhook received');
-
-  setImmediate(() => {
-    try {
-      const { processWebhookEvent } = require('./jobs');
-      processWebhookEvent({ data: { event } }).catch((err) => {
-        logger.error({ err, provider: 'flutterwave', eventId, eventType }, 'flutterwave:webhook job failed');
-      });
-    } catch (err) {
-      logger.error({ err, provider: 'flutterwave', eventId }, 'flutterwave:webhook job dispatch error');
-    }
+  return res.status(result.duplicate ? 200 : 202).json({
+    received: true,
+    duplicate: result.duplicate,
+    event_id: result.webhookEvent.eventId
   });
-
-  return res.status(200).json({ ok: true });
 });
 
 module.exports = router;

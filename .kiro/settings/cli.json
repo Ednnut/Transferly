@@ -1,9 +1,20 @@
 {
   "chat.defaultAgent": "transferly",
-  "chat.enableThinking": true,
+  "chat.enableThinking": false,
   "chat.enableCodeIntelligence": true,
-  "chat.enableSubagent": true,
+  "chat.enableSubagent": false,
   "chat.enableTodoList": true,
   "chat.autoExpandToolOutput": false,
-  "chat.disableInheritingDefaultResources": false
+  "chat.disableInheritingDefaultResources": false,
+  "chat.maxToolRoundtrips": 100,
+  "chat.toolTimeoutMs": 120000,
+  "chat.shellTimeoutMs": 180000,
+  "chat.contextWindowStrategy": "sliding",
+  "chat.preserveTaskContext": true,
+  "chat.autoResumeOnInterrupt": true,
+  "chat.persistSessionState": true,
+  "chat.largeTaskMode": true,
+  "chat.streamingEnabled": false,
+  "chat.toolCallDelayMs": 500,
+  "chat.maxConcurrentToolCalls": 4
 }
